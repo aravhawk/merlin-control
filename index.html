@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Merlin 1D — Hand-Controlled 3D Visualizer</title>
+  <meta name="description" content="Interactive hand-tracked 3D visualizer of the SpaceX Merlin 1D engine, recreating the 2013 'Future of Design' demo." />
+  <meta name="theme-color" content="#02040a" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="labels" aria-hidden="true"></div>
+  <div id="boot"><div class="boot-box"><div class="boot-title">MERLIN&nbsp;1D</div><div class="boot-bar"><i></i></div><div class="boot-sub" id="boot-msg">Generating thrust chamber geometry…</div></div></div>
+  <div id="ui"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
