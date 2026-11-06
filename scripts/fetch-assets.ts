@@ -29,7 +29,7 @@ if (!existsSync(modelDst) || statSync(modelDst).size < 1e6) {
     writeFileSync(modelDst, Buffer.from(await res.arrayBuffer()));
     console.log('[assets] Downloaded hand_landmarker.task');
   } catch (err) {
-    console.warn(`[assets] Could not download hand model (${err.message}). The app will fall back to the CDN at runtime.`);
+    console.warn(`[assets] Could not download hand model (${err instanceof Error ? err.message : err}). The app will fall back to the CDN at runtime.`);
   }
 } else {
   console.log('[assets] hand_landmarker.task present');

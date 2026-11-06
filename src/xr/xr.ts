@@ -6,6 +6,27 @@
  */
 import * as THREE from 'three';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import type { Rig } from '../kinematics/rig.ts';
+import type { Stage } from '../scene/stage.ts';
+import type { SfxName } from '../audio/sfx.ts';
+
+type InputKind = 'select' | 'squeeze' | 'pinch';
+interface Pose {
+  i: number;
+  p: THREE.Vector3;
+  q: THREE.Quaternion;
+}
+interface Source {
+  controller: THREE.XRTargetRaySpace;
+  hand: THREE.XRHandSpace;
+}
+export interface XROptions {
+  stage: Stage;
+  rig: Rig;
+  /** called when a session starts / ends */
+  onChange?: (active: boolean) => void;
+  onGrab?: (kind: Extract<SfxName, 'grab' | 'release'>) => void;
+}
 
 const _p = new THREE.Vector3();
 const _d = new THREE.Vector3();
@@ -13,30 +34,38 @@ const _q = new THREE.Quaternion();
 const _qi = new THREE.Quaternion();
 
 export class XRSupport {
-  constructor({ stage, rig, onChange = () => {}, onGrab = () => {} }) {
+  active = false;
+  supported = false;
+  /** where the engine floats in the room (m) */
+  readonly position = new THREE.Vector3(0, 1.3, -0.85);
+  scale = 0.16;
+  private readonly stage: Stage;
+  private readonly rig: Rig;
+  private readonly onChange: NonNullable<XROptions['onChange']>;
+  private readonly onGrab: NonNullable<XROptions['onGrab']>;
+  private readonly sources: Source[];
+  private grip = [false, false];
+  /** which of select / squeeze / pinch are currently down, per hand */
+  private readonly inputs = [new Set<InputKind>(), new Set<InputKind>()];
+  private prev: (THREE.Quaternion | null)[] = [null, null];
+  private readonly poses: Pose[] = [0, 1].map((i) => ({ i, p: new THREE.Vector3(), q: new THREE.Quaternion() }));
+  private prevDist = 0;
+  private readonly prevMid = new THREE.Vector3();
+  private wasHeld = false;
+  private wasDual = false;
+
+  constructor({ stage, rig, onChange = () => {}, onGrab = () => {} }: XROptions) {
     this.stage = stage;
     this.rig = rig;
     this.onChange = onChange;
     this.onGrab = onGrab;
-    this.active = false;
-    this.supported = false;
-    this.position = new THREE.Vector3(0, 1.3, -0.85);
-    this.scale = 0.16;
-    this.grip = [false, false];
-    this.inputs = [new Set(), new Set()]; // which of select/squeeze/pinch are currently down, per hand
-    this.prev = [null, null];
-    this.poses = [0, 1].map((i) => ({ i, p: new THREE.Vector3(), q: new THREE.Quaternion() }));
-    this.prevDist = 0;
-    this.prevMid = new THREE.Vector3();
-    this.wasHeld = false;
-    this.wasDual = false;
 
     const r = stage.renderer;
     r.xr.enabled = true;
     r.xr.setReferenceSpaceType('local-floor');
 
     const handFactory = new XRHandModelFactory();
-    this.sources = [0, 1].map((i) => {
+    this.sources = [0, 1].map((i): Source => {
       const controller = r.xr.getController(i);
       const hand = r.xr.getHand(i);
       const marker = new THREE.Mesh(
@@ -46,13 +75,14 @@ export class XRSupport {
       controller.add(marker);
       hand.add(handFactory.createHandModel(hand, 'spheres'));
       // a grab lasts while ANY of trigger / squeeze / pinch is held, so releasing one doesn't drop the engine
-      const set = (kind, down) => () => {
+      const set = (kind: InputKind, down: boolean) => () => {
         if (down) this.inputs[i].add(kind);
         else this.inputs[i].delete(kind);
         this.grip[i] = this.inputs[i].size > 0;
       };
-      for (const src of [controller, hand]) {
-        for (const kind of ['select', 'squeeze', 'pinch']) {
+      // three's event map doesn't list pinch events, so subscribe through the base dispatcher type
+      for (const src of [controller, hand] as THREE.EventDispatcher<Record<string, object>>[]) {
+        for (const kind of ['select', 'squeeze', 'pinch'] as const) {
           src.addEventListener(`${kind}start`, set(kind, true));
           src.addEventListener(`${kind}end`, set(kind, false));
         }
@@ -62,7 +92,7 @@ export class XRSupport {
     });
   }
 
-  async detect() {
+  async detect(): Promise<boolean> {
     try {
       this.supported = !!(navigator.xr && (await navigator.xr.isSessionSupported('immersive-vr')));
     } catch {
@@ -71,8 +101,8 @@ export class XRSupport {
     return this.supported;
   }
 
-  async enter() {
-    if (!this.supported) throw new Error('WebXR immersive VR is not available in this browser');
+  async enter(): Promise<void> {
+    if (!this.supported || !navigator.xr) throw new Error('WebXR immersive VR is not available in this browser');
     const session = await navigator.xr.requestSession('immersive-vr', {
       optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
     });
@@ -92,13 +122,13 @@ export class XRSupport {
     this.onChange(true);
   }
 
-  async exit() {
+  async exit(): Promise<void> {
     await this.stage.renderer.xr.getSession()?.end();
   }
 
-  _pose(i, outP, outQ) {
+  private _pose(i: number, outP: THREE.Vector3, outQ: THREE.Quaternion): void {
     const s = this.sources[i];
-    const wrist = s.hand.joints?.wrist;
+    const wrist = s.hand.joints.wrist;
     if (wrist && wrist.visible !== false && s.hand.joints['index-finger-tip']) {
       wrist.getWorldPosition(outP);
       wrist.getWorldQuaternion(outQ);
@@ -108,8 +138,8 @@ export class XRSupport {
     }
   }
 
-  /** Call once per frame while `active`: turns controller/hand input into rig rotation, position and scale (main.js places the engine). */
-  update(dt, t) {
+  /** Call once per frame while `active`: turns controller/hand input into rig rotation, position and scale (main.ts places the engine). */
+  update(dt: number, t: number): void {
     const held = [0, 1].filter((i) => this.grip[i]);
     const poses = held.map((i) => {
       const pose = this.poses[i];
@@ -119,17 +149,22 @@ export class XRSupport {
 
     if (held.length === 1) {
       const { i, q } = poses[0];
-      if (!this.wasHeld || this.wasDual) {
+      const continuing = this.wasHeld && !this.wasDual;
+      if (!continuing) {
         this.rig.beginGrab();
         if (!this.wasHeld) this.onGrab('grab');
-        this.prev[i] = q.clone();
-      } else if (this.prev[i]) {
-        // world-frame rotation delta of the controller
-        _qi.copy(this.prev[i]).invert();
-        _q.copy(q).multiply(_qi);
-        this.rig.addRotation(_q, Math.max(dt, 1e-3), t);
-        this.prev[i].copy(q);
       }
+      const prev = this.prev[i];
+      if (continuing && prev) {
+        // world-frame rotation delta of the controller
+        _q.copy(q).multiply(_qi.copy(prev).invert());
+        this.rig.addRotation(_q, Math.max(dt, 1e-3), t);
+        prev.copy(q);
+      } else {
+        // new grab, or a direct hand-to-hand handover: start from this hand's pose
+        this.prev[i] = q.clone();
+      }
+      this.prev[1 - i] = null; // a stale baseline on the idle hand would jump on its next grab
       this.wasHeld = true;
       this.wasDual = false;
     } else if (held.length === 2) {

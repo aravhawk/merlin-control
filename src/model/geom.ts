@@ -12,6 +12,17 @@
  */
 import * as THREE from 'three';
 
+/** A primitive's output: shaded mesh (optional) + flat line-segment endpoints. */
+export interface Part {
+  solid: THREE.BufferGeometry | null;
+  wire: number[];
+}
+
+/** Profile point for `revolve`: [r, y] or [r, y, crease] (crease is truthy to split strips). */
+export type ProfilePoint = readonly number[];
+export type Vec3Like = THREE.Vector3 | readonly [number, number, number];
+export type Axis = 'x' | 'y' | 'z';
+
 export const TAU = Math.PI * 2;
 const UP = new THREE.Vector3(0, 1, 0);
 const _v = new THREE.Vector3();
@@ -19,16 +30,16 @@ const _v = new THREE.Vector3();
 // ───────────────────────────────────────────────────────── helpers ──
 
 /** Douglas-Peucker polyline decimation (works on Vector3[]). */
-export function decimate(pts, tol) {
+export function decimate(pts: THREE.Vector3[], tol: number): THREE.Vector3[] {
   const n = pts.length;
   if (n < 3) return pts;
   const keep = new Uint8Array(n);
   keep[0] = keep[n - 1] = 1;
-  const stack = [[0, n - 1]];
+  const stack: [number, number][] = [[0, n - 1]];
   const ab = new THREE.Vector3();
   const ap = new THREE.Vector3();
   while (stack.length) {
-    const [a, b] = stack.pop();
+    const [a, b] = stack.pop()!;
     ab.subVectors(pts[b], pts[a]);
     const abLen2 = ab.lengthSq();
     let maxD = -1;
@@ -54,7 +65,7 @@ export function decimate(pts, tol) {
   return pts.filter((_, i) => keep[i]);
 }
 
-function pushPolyline(out, pts) {
+function pushPolyline(out: number[], pts: readonly THREE.Vector3[]): void {
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i];
     const b = pts[i + 1];
@@ -62,7 +73,7 @@ function pushPolyline(out, pts) {
   }
 }
 
-function pushLoop(out, pts) {
+function pushLoop(out: number[], pts: readonly THREE.Vector3[]): void {
   for (let i = 0; i < pts.length; i++) {
     const a = pts[i];
     const b = pts[(i + 1) % pts.length];
@@ -71,7 +82,7 @@ function pushLoop(out, pts) {
 }
 
 /** Small deterministic RNG so the model is identical on every load. */
-export function rng(seed = 1) {
+export function rng(seed = 1): () => number {
   let s = seed >>> 0;
   return () => {
     s = (s + 0x6d2b79f5) >>> 0;
@@ -86,14 +97,14 @@ export function rng(seed = 1) {
 
 export const M = {
   /** translation */
-  t: (x, y, z) => new THREE.Matrix4().makeTranslation(x, y, z),
-  rx: (a) => new THREE.Matrix4().makeRotationX(a),
-  ry: (a) => new THREE.Matrix4().makeRotationY(a),
-  rz: (a) => new THREE.Matrix4().makeRotationZ(a),
+  t: (x: number, y: number, z: number) => new THREE.Matrix4().makeTranslation(x, y, z),
+  rx: (a: number) => new THREE.Matrix4().makeRotationX(a),
+  ry: (a: number) => new THREE.Matrix4().makeRotationY(a),
+  rz: (a: number) => new THREE.Matrix4().makeRotationZ(a),
   /** compose a sequence, applied right-to-left like matrix multiplication */
-  mul: (...ms) => ms.reduce((acc, m) => acc.multiply(m), new THREE.Matrix4()),
+  mul: (...ms: THREE.Matrix4[]) => ms.reduce((acc, m) => acc.multiply(m), new THREE.Matrix4()),
   /** Maps local +Y onto (to - from) and the origin onto `from`. */
-  along(from, to) {
+  along(from: THREE.Vector3, to: THREE.Vector3): { matrix: THREE.Matrix4; length: number } {
     const dir = new THREE.Vector3().subVectors(to, from);
     const len = dir.length();
     const q = new THREE.Quaternion().setFromUnitVectors(UP, dir.normalize());
@@ -105,7 +116,7 @@ export const M = {
 };
 
 /** Apply a matrix to a Part in place and return it. */
-export function place(part, matrix) {
+export function place<P extends Part>(part: P, matrix?: THREE.Matrix4 | null): P {
   if (!matrix) return part;
   if (part.solid) part.solid.applyMatrix4(matrix);
   const w = part.wire;
@@ -121,8 +132,14 @@ export function place(part, matrix) {
 // ───────────────────────────────────────────────────── custom curves ──
 
 /** Circle (or arc) in an arbitrary plane. */
-export class CircleCurve extends THREE.Curve {
-  constructor(center, radius, axis = 'y', a0 = 0, a1 = TAU) {
+export class CircleCurve extends THREE.Curve<THREE.Vector3> {
+  center: THREE.Vector3;
+  radius: number;
+  axis: Axis;
+  a0: number;
+  a1: number;
+
+  constructor(center: THREE.Vector3, radius: number, axis: Axis = 'y', a0 = 0, a1 = TAU) {
     super();
     this.center = center.clone();
     this.radius = radius;
@@ -130,7 +147,7 @@ export class CircleCurve extends THREE.Curve {
     this.a0 = a0;
     this.a1 = a1;
   }
-  getPoint(t, target = new THREE.Vector3()) {
+  override getPoint(t: number, target = new THREE.Vector3()): THREE.Vector3 {
     const a = this.a0 + (this.a1 - this.a0) * t;
     const c = Math.cos(a) * this.radius;
     const s = Math.sin(a) * this.radius;
@@ -142,11 +159,11 @@ export class CircleCurve extends THREE.Curve {
 }
 
 /** Accepts a Vector3 or an [x, y, z] array. */
-const toVec3 = (p) => (p.isVector3 ? p : new THREE.Vector3(...p));
+const toVec3 = (p: Vec3Like): THREE.Vector3 => (p instanceof THREE.Vector3 ? p : new THREE.Vector3(p[0], p[1], p[2]));
 
 /** Piecewise path made from straight runs + quadratic-bezier fillets at the corners. */
-export function filletPath(points, radius) {
-  const path = new THREE.CurvePath();
+export function filletPath(points: readonly Vec3Like[], radius: number): THREE.CurvePath<THREE.Vector3> {
+  const path = new THREE.CurvePath<THREE.Vector3>();
   const P = points.map(toVec3);
   let cursor = P[0].clone();
   for (let i = 1; i < P.length - 1; i++) {
@@ -169,7 +186,7 @@ export function filletPath(points, radius) {
 
 // ───────────────────────────────────────────────────── surfaces of revolution ──
 
-function sampleStrip(pts, smooth, spacing) {
+function sampleStrip(pts: THREE.Vector2[], smooth: boolean, spacing: number): THREE.Vector2[] {
   if (pts.length === 2 || !smooth) {
     // polylines: keep their own vertices (cheap, exact)
     return pts.map((p) => p.clone());
@@ -198,8 +215,20 @@ function sampleStrip(pts, smooth, spacing) {
  *   ringSpacing– extra hoop rings every N units of profile length (0 = creases only)
  *   noRings    – suppress ring generation entirely
  */
-export function revolve(profile, o = {}) {
-  const opt = {
+export interface RevolveOptions {
+  radial?: number;
+  lines?: number | number[];
+  tol?: number;
+  ringSpacing?: number;
+  ringSeg?: number;
+  smooth?: boolean;
+  solidSpacing?: number;
+  noRings?: boolean;
+  trimEnds?: boolean;
+}
+
+export function revolve(profile: readonly ProfilePoint[], o: RevolveOptions = {}): Part {
+  const opt: Required<RevolveOptions> = {
     radial: 64,
     lines: 24,
     tol: 0.003,
@@ -213,8 +242,8 @@ export function revolve(profile, o = {}) {
   };
 
   // split into strips at creases
-  const strips = [];
-  let cur = [];
+  const strips: THREE.Vector2[][] = [];
+  let cur: THREE.Vector2[] = [];
   profile.forEach((p, i) => {
     cur.push(new THREE.Vector2(p[0], p[1]));
     if (i > 0 && (p[2] || i === profile.length - 1)) {
@@ -223,14 +252,14 @@ export function revolve(profile, o = {}) {
     }
   });
 
-  const pos = [];
-  const nor = [];
-  const idx = [];
-  const wire = [];
-  const ringKeys = new Set();
-  const rings = [];
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const idx: number[] = [];
+  const wire: number[] = [];
+  const ringKeys = new Set<string>();
+  const rings: [number, number][] = [];
 
-  const addRing = (r, y) => {
+  const addRing = (r: number, y: number) => {
     if (r < 1e-3) return;
     const key = `${r.toFixed(4)},${y.toFixed(4)}`;
     if (ringKeys.has(key)) return;
@@ -318,7 +347,7 @@ export function revolve(profile, o = {}) {
   const maxL = Array.isArray(opt.lines) ? Math.max(...opt.lines, 8) : Math.max(opt.lines, 8);
   for (const [r, y] of rings) {
     const n = opt.ringSeg || Math.max(8, Math.min(maxL, Math.ceil((TAU * r) / 0.03)));
-    const pts = [];
+    const pts: THREE.Vector3[] = [];
     for (let i = 0; i < n; i++) {
       const th = (TAU * i) / n;
       pts.push(new THREE.Vector3(r * Math.cos(th), y, r * Math.sin(th)));
@@ -326,7 +355,7 @@ export function revolve(profile, o = {}) {
     pushLoop(wire, pts);
   }
 
-  let solid = null;
+  let solid: THREE.BufferGeometry | null = null;
   if (pos.length) {
     solid = new THREE.BufferGeometry();
     solid.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -342,7 +371,23 @@ export function revolve(profile, o = {}) {
  * Circle swept along a 3-D curve (parallel-transport frames, so no twisting).
  * `radius` is a number or (u∈[0,1], length) => number.
  */
-export function tube(curve, radius, o = {}) {
+export type RadiusFn = (u: number, length: number) => number;
+
+export interface TubeOptions {
+  radial?: number;
+  lines?: number;
+  ringSeg?: number;
+  ringSpacing?: number;
+  tol?: number;
+  caps?: boolean;
+  endRings?: boolean;
+  closed?: boolean;
+  spacing?: number;
+  /** radius used for the wire (defaults to the solid radius) */
+  wireRadius?: number | RadiusFn;
+}
+
+export function tube(curve: THREE.Curve<THREE.Vector3>, radius: number | RadiusFn, o: TubeOptions = {}): Part {
   const opt = {
     radial: 20,
     lines: 8,
@@ -358,30 +403,31 @@ export function tube(curve, radius, o = {}) {
   const len = curve.getLength();
   const N = Math.max(8, Math.ceil(len / opt.spacing));
   const frames = curve.computeFrenetFrames(N, opt.closed);
-  const rad = typeof radius === 'function' ? radius : () => radius;
-  const wrad = opt.wireRadius ? (typeof opt.wireRadius === 'function' ? opt.wireRadius : () => opt.wireRadius) : rad;
-  const P = [];
-  const R = [];
-  const RW = [];
+  const toFn = (r: number | RadiusFn): RadiusFn => (typeof r === 'function' ? r : () => r);
+  const rad = toFn(radius);
+  const wrad = opt.wireRadius ? toFn(opt.wireRadius) : rad;
+  const P: THREE.Vector3[] = [];
+  const R: number[] = [];
+  const RW: number[] = [];
   for (let i = 0; i <= N; i++) {
     const u = i / N;
     P.push(curve.getPointAt(u));
     R.push(rad(u, len));
     RW.push(wrad(u, len));
   }
-  const ringPoint = (i, a, RR = R) =>
+  const ringPoint = (i: number, a: number, RR = R): THREE.Vector3 =>
     P[i]
       .clone()
       .addScaledVector(frames.normals[i], Math.cos(a) * RR[i])
       .addScaledVector(frames.binormals[i], Math.sin(a) * RR[i]);
 
-  const wire = [];
-  let solid = null;
+  const wire: number[] = [];
+  let solid: THREE.BufferGeometry | null = null;
 
   {
-    const pos = [];
-    const nor = [];
-    const idx = [];
+    const pos: number[] = [];
+    const nor: number[] = [];
+    const idx: number[] = [];
     const stride = opt.radial + 1;
     for (let i = 0; i <= N; i++) {
       for (let k = 0; k <= opt.radial; k++) {
@@ -404,7 +450,7 @@ export function tube(curve, radius, o = {}) {
       }
     }
     if (opt.caps && !opt.closed) {
-      const capEnd = (i, sign) => {
+      const capEnd = (i: number, sign: number) => {
         const base = pos.length / 3;
         const T = frames.tangents[i];
         pos.push(P[i].x, P[i].y, P[i].z);
@@ -433,11 +479,11 @@ export function tube(curve, radius, o = {}) {
     const loops = opt.closed && L === 0 ? 1 : L; // a bare torus still shows its main loop
     for (let k = 0; k < loops; k++) {
       const a = (TAU * k) / loops;
-      const pts = [];
+      const pts: THREE.Vector3[] = [];
       for (let i = 0; i <= N; i++) pts.push(ringPoint(i, a, RW));
       pushPolyline(wire, decimate(pts, opt.tol));
     }
-    const ringIdx = new Set();
+    const ringIdx = new Set<number>();
     if (opt.endRings && !opt.closed) {
       ringIdx.add(0);
       ringIdx.add(N);
@@ -451,7 +497,7 @@ export function tube(curve, radius, o = {}) {
       const rr = RW[i];
       if (rr < 1e-3) continue;
       const m = opt.ringSeg || (L >= 6 ? L : 12);
-      const pts = [];
+      const pts: THREE.Vector3[] = [];
       for (let k = 0; k < m; k++) pts.push(ringPoint(i, (TAU * k) / m, RW));
       pushLoop(wire, pts);
     }
@@ -460,8 +506,8 @@ export function tube(curve, radius, o = {}) {
 }
 
 /** Torus ring around the Y axis (or any axis via `place`). */
-export function torus(R, r, y = 0, o = {}) {
-  const part = tube(new CircleCurve(new THREE.Vector3(0, y, 0), R, 'y'), r, {
+export function torus(R: number, r: number, y = 0, o: TubeOptions = {}): Part {
+  return tube(new CircleCurve(new THREE.Vector3(0, y, 0), R, 'y'), r, {
     radial: 16,
     lines: 6,
     ringSeg: 0,
@@ -469,12 +515,11 @@ export function torus(R, r, y = 0, o = {}) {
     spacing: Math.max(0.02, R / 40),
     ...o,
   });
-  return part;
 }
 
 // ───────────────────────────────────────────────────── mesh-based prims ──
 
-function stripGeometry(g) {
+function stripGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
   const out = new THREE.BufferGeometry();
   out.setAttribute('position', g.getAttribute('position'));
   out.setAttribute('normal', g.getAttribute('normal'));
@@ -483,20 +528,20 @@ function stripGeometry(g) {
 }
 
 /** Wrap any BufferGeometry; wire = feature edges above `angle` degrees. */
-export function fromGeometry(g, angle = 25, matrix = null) {
+export function fromGeometry(g: THREE.BufferGeometry, angle = 25, matrix: THREE.Matrix4 | null = null): Part {
   const solid = stripGeometry(g);
   const edges = new THREE.EdgesGeometry(g, angle);
-  const wire = Array.from(edges.getAttribute('position').array);
-  const part = { solid, wire };
+  const wire = Array.from(edges.getAttribute('position').array as Float32Array);
+  const part: Part = { solid, wire };
   return matrix ? place(part, matrix) : part;
 }
 
-export function box(w, h, d, matrix = null) {
+export function box(w: number, h: number, d: number, matrix: THREE.Matrix4 | null = null): Part {
   return fromGeometry(new THREE.BoxGeometry(w, h, d), 20, matrix);
 }
 
 /** Solid cylinder about Y from y0 to y1 with optional wire line count. */
-export function cylinder(r, y0, y1, o = {}) {
+export function cylinder(r: number, y0: number, y1: number, o: Omit<RevolveOptions, 'lines'> & { lines?: number } = {}): Part {
   const { lines = 0, radial = 32, ...rest } = o;
   return revolve(
     [
@@ -510,19 +555,19 @@ export function cylinder(r, y0, y1, o = {}) {
 }
 
 /** Cylinder between two arbitrary points. */
-export function cylinderBetween(a, b, r, o = {}) {
+export function cylinderBetween(a: THREE.Vector3, b: THREE.Vector3, r: number, o: Parameters<typeof cylinder>[3] = {}): Part {
   const { matrix, length } = M.along(a, b);
   return place(cylinder(r, 0, length, o), matrix);
 }
 
 /** Hex bolt head sitting on y, pointing up. Wire is the 6-edge hex outline. */
 const _hexGeo = new THREE.CylinderGeometry(1, 1, 1, 6, 1);
-export function hexBolt(size, height, matrix) {
+export function hexBolt(size: number, height: number, matrix?: THREE.Matrix4): Part {
   const solid = stripGeometry(_hexGeo.clone());
   solid.scale(size, height, size);
   solid.translate(0, height / 2, 0);
-  const wire = [];
-  const top = [];
+  const wire: number[] = [];
+  const top: THREE.Vector3[] = [];
   for (let i = 0; i < 6; i++) {
     const a = (TAU * i) / 6 + Math.PI / 6;
     top.push(new THREE.Vector3(Math.cos(a) * size, height, Math.sin(a) * size));
@@ -532,8 +577,8 @@ export function hexBolt(size, height, matrix) {
 }
 
 /** A ring of hex bolts on a horizontal plane, heads facing +Y. */
-export function boltRing(radius, y, count, size, height, phase = 0) {
-  const parts = [];
+export function boltRing(radius: number, y: number, count: number, size: number, height: number, phase = 0): Part[] {
+  const parts: Part[] = [];
   for (let i = 0; i < count; i++) {
     const a = phase + (TAU * i) / count;
     parts.push(hexBolt(size, height, M.t(Math.cos(a) * radius, y, Math.sin(a) * radius)));
@@ -542,9 +587,9 @@ export function boltRing(radius, y, count, size, height, phase = 0) {
 }
 
 /** Small polygon circle (orifice / port) lying in the XZ plane. */
-export function circleWire(cx, y, cz, r, seg = 6) {
-  const wire = [];
-  const pts = [];
+export function circleWire(cx: number, y: number, cz: number, r: number, seg = 6): Part {
+  const wire: number[] = [];
+  const pts: THREE.Vector3[] = [];
   for (let i = 0; i < seg; i++) {
     const a = (TAU * i) / seg;
     pts.push(new THREE.Vector3(cx + Math.cos(a) * r, y, cz + Math.sin(a) * r));
@@ -554,7 +599,7 @@ export function circleWire(cx, y, cz, r, seg = 6) {
 }
 
 /** Thin cable: a polyline (wire) + a very thin tube (solid). */
-export function cable(points, radius = 0.006) {
+export function cable(points: readonly Vec3Like[], radius = 0.006): Part {
   const curve = new THREE.CatmullRomCurve3(
     points.map(toVec3),
     false,
@@ -564,7 +609,7 @@ export function cable(points, radius = 0.006) {
 }
 
 /** Flat annulus / ring body with rectangular section (closed profile). */
-export function annulus(ri, ro, y0, y1, o = {}) {
+export function annulus(ri: number, ro: number, y0: number, y1: number, o: RevolveOptions = {}): Part {
   return revolve(
     [
       [ro, y1],
@@ -581,8 +626,8 @@ export function annulus(ri, ro, y0, y1, o = {}) {
  * Circular (or elliptical, with `radY`) arc for revolve profiles: angles in radians,
  * (cr, cy) centre. Pass `creaseEnd` to make the last point a profile crease.
  */
-export function arc(cr, cy, rad, a0, a1, n = 12, { radY = rad, creaseEnd = false } = {}) {
-  const out = [];
+export function arc(cr: number, cy: number, rad: number, a0: number, a1: number, n = 12, { radY = rad, creaseEnd = false } = {}): ProfilePoint[] {
+  const out: number[][] = [];
   for (let i = 0; i <= n; i++) {
     const a = a0 + ((a1 - a0) * i) / n;
     out.push([cr + Math.cos(a) * rad, cy + Math.sin(a) * radY]);
@@ -595,7 +640,7 @@ export function arc(cr, cy, rad, a0, a1, n = 12, { radY = rad, creaseEnd = false
  * Rectangular hoop stiffener sitting on a wall of inner radius `ri` at height `y`
  * (half-height `h`, radial depth `depth`). Only its two outer hoops are drawn.
  */
-export function hoopBand(ri, y, h, depth, { radial = 96, ringSeg = 44 } = {}) {
+export function hoopBand(ri: number, y: number, h: number, depth: number, { radial = 96, ringSeg = 44 } = {}): Part {
   return revolve([[ri, y + h], [ri + depth, y + h, 1], [ri + depth, y - h, 1], [ri, y - h]], {
     lines: 0,
     radial,
@@ -608,12 +653,13 @@ export function hoopBand(ri, y, h, depth, { radial = 96, ringSeg = 44 } = {}) {
 // ───────────────────────────────────────────────────── merging ──
 
 /** Collects Parts, groups the solids by material, and flattens wire data. */
+export type MaterialKey = 'steel' | 'chrome' | 'bronze' | 'copper' | 'inconel' | 'titanium' | 'black';
+
 export class Builder {
-  constructor() {
-    this.wire = [];
-    this.solids = new Map(); // material key → BufferGeometry[]
-  }
-  add(part, material = 'steel', matrix = null) {
+  readonly wire: number[] = [];
+  readonly solids = new Map<MaterialKey, THREE.BufferGeometry[]>();
+
+  add(part: Part | Part[], material: MaterialKey = 'steel', matrix: THREE.Matrix4 | null = null): this {
     if (Array.isArray(part)) {
       part.forEach((p) => this.add(p, material, matrix));
       return this;
@@ -621,17 +667,18 @@ export class Builder {
     if (matrix) place(part, matrix);
     for (let i = 0; i < part.wire.length; i++) this.wire.push(part.wire[i]);
     if (part.solid) {
-      if (!this.solids.has(material)) this.solids.set(material, []);
-      this.solids.get(material).push(part.solid);
+      let list = this.solids.get(material);
+      if (!list) this.solids.set(material, (list = []));
+      list.push(part.solid);
     }
     return this;
   }
   /** Wire-only extras (e.g. decorative lines) */
-  addWire(wire) {
+  addWire(wire: readonly number[]): this {
     for (let i = 0; i < wire.length; i++) this.wire.push(wire[i]);
     return this;
   }
-  get segmentCount() {
+  get segmentCount(): number {
     return this.wire.length / 6;
   }
 }

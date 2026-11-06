@@ -9,13 +9,29 @@
  * even though camera frames arrive at an irregular rate.
  */
 
-const alphaFor = (cutoff, dt) => {
+const alphaFor = (cutoff: number, dt: number): number => {
   const tau = 1 / (2 * Math.PI * cutoff);
   return 1 / (1 + tau / dt);
 };
 
+export interface OneEuroParams {
+  /** Hz — cutoff when the signal is still (lower = smoother, laggier) */
+  minCutoff?: number;
+  /** speed coefficient — how much the cutoff rises with velocity (higher = less lag) */
+  beta?: number;
+  /** Hz — cutoff for the derivative estimate */
+  dCutoff?: number;
+}
+
 export class OneEuro {
-  constructor({ minCutoff = 1.0, beta = 0.0, dCutoff = 1.0 } = {}) {
+  minCutoff: number;
+  beta: number;
+  dCutoff: number;
+  x: number | null = null;
+  dx = 0;
+  t: number | null = null;
+
+  constructor({ minCutoff = 1.0, beta = 0.0, dCutoff = 1.0 }: OneEuroParams = {}) {
     this.minCutoff = minCutoff;
     this.beta = beta;
     this.dCutoff = dCutoff;
@@ -28,9 +44,9 @@ export class OneEuro {
     this.t = null;
   }
 
-  /** @param {number} value  raw sample  @param {number} t  seconds */
-  filter(value, t) {
-    if (this.x === null) {
+  /** `value` is the raw sample, `t` its timestamp in seconds. */
+  filter(value: number, t: number): number {
+    if (this.x === null || this.t === null) {
       this.x = value;
       this.t = t;
       this.dx = 0;
@@ -48,21 +64,20 @@ export class OneEuro {
   }
 }
 
+export type Vec3Tuple = [number, number, number];
+
 /** Filter for a fixed-size vector (e.g. one landmark's x,y,z). */
 export class OneEuroVec {
-  constructor(size, params) {
+  readonly f: OneEuro[];
+
+  constructor(size: number, params?: OneEuroParams) {
     this.f = Array.from({ length: size }, () => new OneEuro(params));
   }
   reset() {
     this.f.forEach((f) => f.reset());
   }
-  /** filters in place into `out` (array-like) */
-  filter(input, t, out = []) {
-    for (let i = 0; i < this.f.length; i++) out[i] = this.f[i].filter(input[i], t);
-    return out;
-  }
-  /** 3-component variant that takes scalars, so per-landmark filtering allocates nothing */
-  filter3(x, y, z, t, out) {
+  /** Filters one 3-component sample into `out`; takes scalars so per-landmark filtering allocates nothing. */
+  filter3(x: number, y: number, z: number, t: number, out: Vec3Tuple): Vec3Tuple {
     out[0] = this.f[0].filter(x, t);
     out[1] = this.f[1].filter(y, t);
     out[2] = this.f[2].filter(z, t);

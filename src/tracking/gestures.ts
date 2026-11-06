@@ -8,8 +8,29 @@
  *   open palm while spinning → catch: the spin decays to zero over a short eased interval
  */
 import { MathUtils, Quaternion, Vector3 } from 'three';
-import { quatFromRotationVector } from '../kinematics/rig.js';
-import { wrapPi } from './handPipeline.js';
+import { quatFromRotationVector, type Rig } from '../kinematics/rig.ts';
+import { wrapPi, type Track } from './handPipeline.ts';
+
+export type GestureState = 'none' | 'idle' | 'single' | 'dual';
+export type GestureEvent = { type: 'grab' | 'release' | 'catch' | 'flick' };
+export interface GestureSettings {
+  sensitivity: number;
+  invertZoom: boolean;
+}
+
+interface SingleBase {
+  t: number;
+  x: number;
+  y: number;
+  roll: number;
+}
+interface DualBase {
+  t: number;
+  mx: number;
+  my: number;
+  d: number;
+  ang: number;
+}
 
 const _rv = new Vector3();
 const _q = new Quaternion();
@@ -18,7 +39,7 @@ const Z = new Vector3(0, 0, 1);
 // clutch weight fades the applied rotation to zero as the hand closes (openness W_HI → W_LO)
 const W_LO = 0.3;
 const W_HI = 0.65;
-const clutchWeight = (tr) => MathUtils.smoothstep(tr.openness, W_LO, W_HI);
+const clutchWeight = (tr: Track): number => MathUtils.smoothstep(tr.openness, W_LO, W_HI);
 
 export const GAINS = {
   translate: 3.4, // rad per frame-width of palm travel
@@ -31,23 +52,24 @@ export const GAINS = {
 };
 
 export class GestureController {
-  /**
-   * @param {import('../kinematics/rig.js').Rig} rig
-   * @param {() => {sensitivity:number, invertZoom:boolean}} getSettings
-   * @param {(e:{type:string})=>void} [emit]
-   */
-  constructor(rig, getSettings, emit = () => {}) {
+  state: GestureState = 'none';
+  /** current clutch weight 0..1 */
+  weight = 0;
+  private readonly rig: Rig;
+  private readonly getSettings: () => GestureSettings;
+  private readonly emit: (e: GestureEvent) => void;
+  private base: SingleBase | DualBase | null = null;
+  private activeIds: number[] = [];
+  private engagedAt = 0;
+
+  constructor(rig: Rig, getSettings: () => GestureSettings, emit: (e: GestureEvent) => void = () => {}) {
     this.rig = rig;
     this.getSettings = getSettings;
     this.emit = emit;
-    this.state = 'none'; // none | idle | single | dual
-    this.base = null;
-    this.activeIds = [];
-    this.weight = 0;
   }
 
   /** Called when tracking stops (camera off). */
-  release(t = performance.now() / 1000) {
+  release(t = performance.now() / 1000): void {
     if (this.state === 'single' || this.state === 'dual') this.rig.endGrab(t, { flick: false });
     this.state = 'none';
     this.base = null;
@@ -55,29 +77,26 @@ export class GestureController {
     this.weight = 0;
   }
 
-  /**
-   * @param {object[]} tracks  pipeline.tracks (alive tracks)
-   * @param {number} t         seconds, same clock as the pipeline
-   * @param {number} aspectInv video height/width
-   */
-  update(tracks, t, aspectInv = 0.75) {
+  /** `tracks` are the pipeline's alive tracks; `t` uses the pipeline's clock (s); `aspectInv` = video height / width. */
+  update(tracks: readonly Track[], t: number, aspectInv = 0.75): void {
     const alive = tracks.filter((tr) => tr.stable);
     const open = alive.filter((tr) => tr.open && tr.frames >= 6).sort((a, b) => a.id - b.id);
-    let desired = 'none';
+    let desired: GestureState = 'none';
     if (open.length >= 2) desired = 'dual';
     else if (open.length === 1) desired = 'single';
     else if (alive.length) desired = 'idle';
 
-    const ids = (desired === 'dual' ? open.slice(0, 2) : desired === 'single' ? open.slice(0, 1) : []).map((x) => x.id);
+    const active = open.slice(0, desired === 'dual' ? 2 : desired === 'single' ? 1 : 0);
+    const ids = active.map((x) => x.id);
     const sameIds = ids.length === this.activeIds.length && ids.every((v, i) => v === this.activeIds[i]);
 
-    if (desired !== this.state || !sameIds) this._transition(desired, ids, open, t);
+    if (desired !== this.state || !sameIds) this._transition(desired, ids, t);
 
-    if (this.state === 'single') this._single(open[0], t);
-    else if (this.state === 'dual') this._dual(open.slice(0, 2), t, aspectInv);
+    if (this.state === 'single') this._single(active[0], t);
+    else if (this.state === 'dual') this._dual(active, t, aspectInv);
   }
 
-  _transition(next, ids, open, t) {
+  private _transition(next: GestureState, ids: number[], t: number): void {
     const prev = this.state;
     const wasHeld = prev === 'single' || prev === 'dual';
     const willHold = next === 'single' || next === 'dual';
@@ -104,12 +123,12 @@ export class GestureController {
     if (!willHold) this.weight = 0;
   }
 
-  _single(tr, t) {
+  private _single(tr: Track, t: number): void {
     const s = this.getSettings();
     const weight = clutchWeight(tr);
     this.weight = weight;
     if (tr.lastSeen !== t) return; // detection missed this frame — hold
-    const cur = { t, x: tr.palm.x, y: tr.palm.y, roll: tr.roll };
+    const cur: SingleBase = { t, x: tr.palm.x, y: tr.palm.y, roll: tr.roll };
     if (!this.base) {
       this.base = cur;
       this.engagedAt = t;
@@ -119,7 +138,7 @@ export class GestureController {
       this.base = cur;
       return;
     }
-    const b = this.base;
+    const b = this.base as SingleBase;
     const dt = t - b.t;
     if (dt <= 0) return;
 
@@ -133,7 +152,7 @@ export class GestureController {
     this.rig.addRotation(quatFromRotationVector(rv, _q), dt, t, weight);
   }
 
-  _dual(pair, t, aspectInv) {
+  private _dual(pair: Track[], t: number, aspectInv: number): void {
     const s = this.getSettings();
     const [a, b] = pair;
     this.weight = Math.min(clutchWeight(a), clutchWeight(b));
@@ -142,7 +161,7 @@ export class GestureController {
     const my = (a.palm.y + b.palm.y) / 2;
     const dx = b.palm.x - a.palm.x;
     const dy = b.palm.y - a.palm.y;
-    const cur = { t, mx, my, d: Math.max(0.02, Math.hypot(dx, dy)), ang: Math.atan2(dy, dx) };
+    const cur: DualBase = { t, mx, my, d: Math.max(0.02, Math.hypot(dx, dy)), ang: Math.atan2(dy, dx) };
     if (!this.base) {
       this.base = cur;
       this.engagedAt = t;
@@ -152,7 +171,7 @@ export class GestureController {
       this.base = cur;
       return;
     }
-    const bs = this.base;
+    const bs = this.base as DualBase;
     const dt = t - bs.t;
     if (dt <= 0) return;
     const w = this.weight;

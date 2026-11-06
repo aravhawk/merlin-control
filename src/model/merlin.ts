@@ -1,7 +1,7 @@
 /**
  * Procedural SpaceX Merlin 1D (sea-level) engine.
  *
- * Built entirely from parametric primitives (see geom.js) so no external model
+ * Built entirely from parametric primitives (see geom.ts) so no external model
  * files are required. The layout follows the public configuration of the engine:
  *
  *   gimbal bearing + thrust mount
@@ -20,6 +20,9 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   Builder,
+  type MaterialKey,
+  type Part,
+  type RadiusFn,
   M,
   TAU,
   annulus,
@@ -38,9 +41,9 @@ import {
   rng,
   torus,
   tube,
-} from './geom.js';
+} from './geom.ts';
 
-const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const V = (x: number, y: number, z: number): THREE.Vector3 => new THREE.Vector3(x, y, z);
 
 // ───────────────────────────────────────────── engine dimensions ──
 export const DIM = {
@@ -56,8 +59,8 @@ export const DIM = {
 
 // ─────────────────────────────────────── thrust-chamber contour ──
 /** Builds the inner wall contour (injector face → nozzle exit) as [{y, r}] top→bottom. */
-function buildContour() {
-  const pts = [];
+function buildContour(): { y: number; r: number }[] {
+  const pts: { y: number; r: number }[] = [];
   const { yFace, yBarrel, yThroat, yExit, rChamber: rc, rThroat: rt, rExit: re } = DIM;
 
   // fat cylindrical barrel
@@ -101,7 +104,7 @@ function buildContour() {
 const CONTOUR = buildContour();
 
 /** Inner wall radius at height y (linear interpolation of the contour). */
-export function wallR(y) {
+export function wallR(y: number): number {
   if (y >= CONTOUR[0].y) return CONTOUR[0].r;
   for (let i = 1; i < CONTOUR.length; i++) {
     if (y >= CONTOUR[i].y) {
@@ -115,8 +118,8 @@ export function wallR(y) {
 }
 
 /** Contour slice as [r, y] points, top→bottom, sampled every `step` metres. */
-function slice(yTop, yBot, step = 0.05, offset = 0) {
-  const out = [];
+function slice(yTop: number, yBot: number, step = 0.05, offset = 0): number[][] {
+  const out: number[][] = [];
   const n = Math.max(2, Math.ceil((yTop - yBot) / step));
   for (let i = 0; i <= n; i++) {
     const y = yTop + ((yBot - yTop) * i) / n;
@@ -139,8 +142,26 @@ const Y_BEAR = 1.14; // gimbal bearing centre
 const pumpFrame = M.mul(M.t(TP.x, TP.y, TP.z), M.rx(Math.PI / 2));
 
 /** Spiral volute + tangential discharge. Returns the part and the discharge end/tangent. */
-function volute({ s, R0, R1, r0, r1, rEnd, a0, dir = 1, run = 0.12 }) {
-  const pts = [];
+interface VoluteSpec {
+  /** axial station */
+  s: number;
+  /** spiral start / end centreline radius */
+  R0: number;
+  R1: number;
+  /** tube radius at spiral start / end */
+  r0: number;
+  r1: number;
+  /** tube radius at the end of the discharge run */
+  rEnd: number;
+  /** start angle */
+  a0: number;
+  dir?: number;
+  /** straight discharge length */
+  run?: number;
+}
+
+function volute({ s, R0, R1, r0, r1, rEnd, a0, dir = 1, run = 0.12 }: VoluteSpec) {
+  const pts: THREE.Vector3[] = [];
   const steps = 64;
   for (let i = 0; i <= steps; i++) {
     const f = i / steps;
@@ -157,14 +178,26 @@ function volute({ s, R0, R1, r0, r1, rEnd, a0, dir = 1, run = 0.12 }) {
   const lenTotal = curve.getLength();
   const spiralLen = new THREE.CatmullRomCurve3(pts.slice(0, spiralPts), false, 'centripetal').getLength();
   const uS = spiralLen / lenTotal;
-  const radius = (u) =>
+  const radius = (u: number) =>
     u < uS ? r0 + (r1 - r0) * Math.pow(u / uS, 1.15) : r1 + (rEnd - r1) * ((u - uS) / (1 - uS));
   const part = tube(curve, radius, { radial: 24, lines: 6, ringSpacing: 0.22, spacing: 0.02, tol: 0.005 });
   return { part, end: pts[pts.length - 1].clone(), tangent: tan, rEnd };
 }
 
 // ──────────────────────────────────────────── assembly metadata ──
-const META = [
+export type AssemblyId = 'gimbal' | 'actuators' | 'injector' | 'chamber' | 'nozzle' | 'skirt' | 'turbopump' | 'gg' | 'lox' | 'fuel' | 'exhaust' | 'igniter';
+
+export interface AssemblyMeta {
+  id: AssemblyId;
+  name: string;
+  info: string;
+  /** exploded-view offset (m) */
+  explode: [number, number, number];
+  /** label anchor in model space (m) */
+  anchor: [number, number, number];
+}
+
+const META: AssemblyMeta[] = [
   { id: 'gimbal', name: 'Gimbal & Thrust Mount', info: 'Spherical gimbal bearing and thrust frame transferring ~845 kN to the octaweb.', explode: [0, 0.65, 0], anchor: [0.0, 1.27, 0.0] },
   { id: 'actuators', name: 'Gimbal Actuators', info: 'Pair of hydraulic actuators steering the thrust vector ±5°.', explode: [-0.5, 0.8, 0.0], anchor: [-0.5, 1.28, 0.5] },
   { id: 'injector', name: 'Pintle Injector', info: 'Coaxial pintle injector — the throttle-friendly heart of the Merlin lineage.', explode: [0, 0.42, 0], anchor: [0.05, 0.84, 0.25] },
@@ -257,13 +290,13 @@ function buildActuators() {
     const eyeBase = torus(0.028, 0.012, 0.0, { lines: 0, radial: 10, ringSeg: 12 });
     place(eyeBase, M.rx(Math.PI / 2));
     const collar = cylinder(0.062, L * 0.4, L * 0.43, { lines: 12, radial: 24 });
-    const hose = (ang) => {
+    const hose = (ang: number) => {
       const p0 = V(Math.cos(ang) * 0.058, L * 0.15, Math.sin(ang) * 0.058);
       const p1 = V(Math.cos(ang) * 0.075, L * 0.3, Math.sin(ang) * 0.075);
       const p2 = V(Math.cos(ang) * 0.058, L * 0.58, Math.sin(ang) * 0.058);
       return tube(new THREE.CatmullRomCurve3([p0, p1, p2]), 0.008, { radial: 8, lines: 3, endRings: false, spacing: 0.04 });
     };
-    const parts = [
+    const parts: [Part, MaterialKey][] = [
       [body, 'steel'],
       [rod, 'chrome'],
       [collar, 'titanium'],
@@ -271,7 +304,7 @@ function buildActuators() {
       [eyeBase, 'titanium'],
       [hose(0.8), 'black'],
       [hose(2.4), 'black'],
-      ...cooling.map((c) => [c, 'titanium']),
+      ...cooling.map((c): [Part, MaterialKey] => [c, 'titanium']),
     ];
     for (const [p, mat] of parts) b.add(p, mat, matrix);
   });
@@ -336,7 +369,7 @@ function buildInjector() {
   }
 
   // fuel manifold: stacked brass-coloured rings round the head (as on the real engine)
-  [-0.03, 0.02, 0.07].forEach((dy, i) => b.add(torus(rh + 0.03, 0.021, yFace + dy, { lines: 1, radial: 14, ringSeg: 44 }), 'bronze'));
+  [-0.03, 0.02, 0.07].forEach((dy) => b.add(torus(rh + 0.03, 0.021, yFace + dy, { lines: 1, radial: 14, ringSeg: 44 }), 'bronze'));
   b.add(boltRing(RC - 0.015, Y_DOME, 16, 0.0095, 0.012, 0.08), 'black');
 
   // LOX inlet stub on the dome (+X, towards the turbopump)
@@ -436,7 +469,7 @@ function buildSkirt() {
 
 function buildTurbopump() {
   const b = new Builder();
-  const at = (part, mat) => b.add(part, mat, pumpFrame);
+  const at = (part: Part | Part[], mat: MaterialKey) => b.add(part, mat, pumpFrame);
 
   // RP-1 pump: back plate, hub, inlet cone, flange (profile runs back→front, −s)
   at(
@@ -511,11 +544,12 @@ function buildTurbopump() {
   ];
   struts.forEach(([p0, p1]) => b.add(tube(new THREE.LineCurve3(p0, p1), 0.012, { radial: 8, lines: 4, endRings: true, ringSeg: 8 }), 'titanium'));
 
-  b.fuelEnd = fuelV.end.clone().add(TP);
-  b.fuelTan = fuelV.tangent.clone();
-  b.loxEnd = loxV.end.clone().add(TP);
-  b.loxTan = loxV.tangent.clone();
-  return b;
+  return Object.assign(b, {
+    fuelEnd: fuelV.end.clone().add(TP),
+    fuelTan: fuelV.tangent.clone(),
+    loxEnd: loxV.end.clone().add(TP),
+    loxTan: loxV.tangent.clone(),
+  });
 }
 
 function buildGG() {
@@ -544,11 +578,10 @@ function buildGG() {
   b.add(cylinderBetween(V(x, yb + 0.27, z + 0.05), V(x, yb + 0.27, z + 0.15), 0.016, { lines: 6, radial: 12 }), 'chrome');
   b.add(cylinderBetween(V(x, yb + 0.27, z - 0.05), V(x, yb + 0.27, z - 0.15), 0.016, { lines: 6, radial: 12 }), 'chrome');
   b.add(cylinderBetween(V(x, yb + 0.02, z), V(x, yb - 0.04, z), 0.034, { lines: 8, radial: 16 }), 'steel');
-  b.ggTop = yb + 0.27;
-  return b;
+  return Object.assign(b, { ggTop: yb + 0.27 });
 }
 
-function bellowsRadius(r, from, to, period, amp) {
+function bellowsRadius(r: number, from: number, to: number, period: number, amp: number): RadiusFn {
   return (u, len) => {
     if (u < from || u > to) return r;
     const w = Math.sin((u * len * TAU) / period);
@@ -556,7 +589,7 @@ function bellowsRadius(r, from, to, period, amp) {
   };
 }
 
-function flange(center, dir, r, thick = 0.016, bolts = 0) {
+function flange(center: THREE.Vector3, dir: THREE.Vector3, r: number, thick = 0.016, bolts = 0): Part[] {
   const to = center.clone().addScaledVector(dir, thick);
   const parts = [cylinderBetween(center, to, r, { lines: 0, radial: 28 })];
   if (bolts) {
@@ -566,7 +599,10 @@ function flange(center, dir, r, thick = 0.016, bolts = 0) {
   return parts;
 }
 
-function buildLox(tp, gg) {
+type Turbopump = ReturnType<typeof buildTurbopump>;
+type GasGenerator = ReturnType<typeof buildGG>;
+
+function buildLox(tp: Turbopump, gg: GasGenerator) {
   const b = new Builder();
   const yTop = 1.12;
 
@@ -620,7 +656,7 @@ function buildLox(tp, gg) {
   return b;
 }
 
-function buildFuel(tp, gg) {
+function buildFuel(tp: Turbopump, gg: GasGenerator) {
   const b = new Builder();
   const yTop = 1.04;
 
@@ -644,7 +680,7 @@ function buildFuel(tp, gg) {
   const phi = -0.95;
   const pts = [e, e.clone().addScaledVector(tp.fuelTan, 0.1), V(0.4, 0.06, -0.55)];
   const ys = [-0.15, -0.35, -0.55, -0.7, -0.78];
-  const rm = (y) => wallR(y) + 0.014;
+  const rm = (y: number) => wallR(y) + 0.014;
   ys.forEach((y, i) => {
     const rad = rm(y) + (i < 3 ? 0.14 : 0.095);
     const ph = phi + (i / ys.length) * 0.2;
@@ -716,7 +752,7 @@ function buildExhaust() {
   return b;
 }
 
-function buildHarness(gg) {
+function buildHarness() {
   const b = new Builder();
   const rand = rng(7);
 
@@ -759,7 +795,7 @@ function buildHarness(gg) {
     V(0.1, 0.9, 0.3),
     V(-0.2, 0.9, 0.25),
   ];
-  targets.forEach((tg, i) => {
+  targets.forEach((tg) => {
     const mid = jb.clone().lerp(tg, 0.5).add(V((rand() - 0.5) * 0.12, (rand() - 0.3) * 0.12, (rand() - 0.5) * 0.12));
     const mid2 = jb.clone().lerp(tg, 0.8).add(V((rand() - 0.5) * 0.06, (rand() - 0.5) * 0.06, (rand() - 0.5) * 0.06));
     b.add(cable([jb.clone().add(V(0, -0.05, (rand() - 0.5) * 0.06)), mid, mid2, tg], 0.0055), 'black');
@@ -800,15 +836,25 @@ function buildHarness(gg) {
 
 // ───────────────────────────────────────────── public API ──
 
-/**
- * Generates the engine. Returns:
- *   { assemblies: [{ id, name, info, explode, anchor, wire: Float32Array,
- *                    solids: [{ material, geometry }], segments }], totalSegments, bounds }
- */
-export function buildMerlin() {
+export interface Assembly extends AssemblyMeta {
+  /** line-segment endpoints (x1,y1,z1,x2,y2,z2,…) */
+  wire: Float32Array;
+  /** one merged geometry per material */
+  solids: { material: MaterialKey; geometry: THREE.BufferGeometry }[];
+  segments: number;
+}
+
+export interface MerlinModel {
+  assemblies: Assembly[];
+  totalSegments: number;
+  bounds: THREE.Box3;
+}
+
+/** Generates the engine. */
+export function buildMerlin(): MerlinModel {
   const turbo = buildTurbopump();
   const gg = buildGG();
-  const builders = {
+  const builders: Record<AssemblyId, Builder> = {
     gimbal: buildGimbal(),
     actuators: buildActuators(),
     injector: buildInjector(),
@@ -820,12 +866,12 @@ export function buildMerlin() {
     lox: buildLox(turbo, gg),
     fuel: buildFuel(turbo, gg),
     exhaust: buildExhaust(),
-    igniter: buildHarness(gg),
+    igniter: buildHarness(),
   };
 
-  const assemblies = META.map((m) => {
+  const assemblies = META.map((m): Assembly => {
     const b = builders[m.id];
-    const solids = [];
+    const solids: Assembly['solids'] = [];
     for (const [material, geos] of b.solids) {
       const geometry = mergeGeometries(geos);
       geos.forEach((g) => g.dispose());

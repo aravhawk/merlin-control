@@ -14,7 +14,24 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { AnaglyphEffect } from 'three/addons/effects/AnaglyphEffect.js';
-import { rng } from '../model/geom.js';
+import { rng } from '../model/geom.ts';
+import type { QualityLevel } from '../perf.ts';
+
+export interface QualityTier {
+  pixelRatio: number;
+  msaa: number;
+  bloomScale: number;
+  /** shadow map size; 0 disables shadows */
+  shadows: number;
+}
+
+/** Post-processing / lighting look (see EngineView.look). */
+export interface Look {
+  bloomThreshold: number;
+  bloomStrength: number;
+  exposure: number;
+  shadows: boolean;
+}
 
 const FINISH_SHADER = {
   uniforms: { tDiffuse: { value: null }, uVignette: { value: 0.55 }, uTime: { value: 0 } },
@@ -39,14 +56,31 @@ const FINISH_SHADER = {
     }`,
 };
 
-export const QUALITY = {
+export const QUALITY: Record<QualityLevel, QualityTier> = {
   low: { pixelRatio: 1, msaa: 0, bloomScale: 0.35, shadows: 0 },
   medium: { pixelRatio: 1.5, msaa: 2, bloomScale: 0.5, shadows: 1024 },
   high: { pixelRatio: 2, msaa: 4, bloomScale: 0.6, shadows: 2048 },
 };
 
 export class Stage {
-  constructor(canvas) {
+  readonly canvas: HTMLCanvasElement;
+  readonly renderer: THREE.WebGLRenderer;
+  readonly scene = new THREE.Scene();
+  readonly camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
+  readonly settings = { bloom: true, vignette: true, anaglyph: false };
+  readonly anaglyph: AnaglyphEffect;
+  quality: QualityTier = QUALITY.high;
+  size = { w: 1, h: 1 };
+  time = 0;
+  /** distance to the model, used as the anaglyph convergence plane */
+  focusDist = 7;
+  private keyLight!: THREE.DirectionalLight;
+  private stars!: THREE.Points;
+  private composer!: EffectComposer;
+  private bloomPass!: UnrealBloomPass;
+  private finishPass!: ShaderPass;
+
+  constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const renderer = new THREE.WebGLRenderer({
       canvas,
@@ -61,29 +95,19 @@ export class Stage {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
 
-    this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x02040a);
-
-    this.camera = new THREE.PerspectiveCamera(34, 1, 0.1, 400);
     this.camera.position.set(0, 0, 7);
 
     this._buildLights();
     this._buildEnvironment();
     this._buildStars();
 
-    this.settings = { bloom: true, vignette: true, anaglyph: false };
-    this.quality = QUALITY.high;
-    this.pixelRatioCap = window.devicePixelRatio || 1;
-    this.size = { w: 1, h: 1 };
-    this.time = 0;
-    this.focusDist = 7;
-
     this._buildComposer();
     this.anaglyph = new AnaglyphEffect(renderer, 2, 2);
     this.applyQuality('high');
   }
 
-  _buildLights() {
+  private _buildLights(): void {
     const key = new THREE.DirectionalLight(0xfff1e0, 3.0);
     key.position.set(-4, 5, 6);
     key.castShadow = true;
@@ -109,7 +133,7 @@ export class Stage {
     this.scene.add(key, fill, rim, under, hemi);
   }
 
-  _buildEnvironment() {
+  private _buildEnvironment(): void {
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     const room = new RoomEnvironment();
     this.scene.environment = pmrem.fromScene(room, 0.035).texture;
@@ -118,7 +142,7 @@ export class Stage {
     pmrem.dispose();
   }
 
-  _buildStars() {
+  private _buildStars(): void {
     const n = 1800;
     const pos = new Float32Array(n * 3);
     const col = new Float32Array(n * 3);
@@ -150,7 +174,7 @@ export class Stage {
     this.scene.add(this.stars);
   }
 
-  _buildComposer() {
+  private _buildComposer(): void {
     const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: 4 });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
@@ -161,8 +185,7 @@ export class Stage {
     this.composer.addPass(new OutputPass());
   }
 
-  /** @param {'low'|'medium'|'high'} name */
-  applyQuality(name) {
+  applyQuality(name: QualityLevel): void {
     const q = (this.quality = QUALITY[name]);
     const shadowsChanged = this.renderer.shadowMap.enabled !== q.shadows > 0;
     this.renderer.shadowMap.enabled = q.shadows > 0;
@@ -183,33 +206,38 @@ export class Stage {
     if (shadowsChanged) {
       // shadow on/off changes the generated shaders
       this.scene.traverse((o) => {
-        if (o.material && !Array.isArray(o.material)) o.material.needsUpdate = true;
+        const m = (o as THREE.Mesh).material;
+        if (m && !Array.isArray(m)) m.needsUpdate = true;
       });
     }
     this.resize();
   }
 
-  get pixelRatio() {
-    return Math.min(this.pixelRatioCap, this.quality.pixelRatio);
+  get pixelRatio(): number {
+    return Math.min(window.devicePixelRatio || 1, this.quality.pixelRatio);
   }
 
-  resize() {
+  resize(): void {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
+    const pr = this.pixelRatio;
     this.size = { w, h };
-    this.renderer.setPixelRatio(this.pixelRatio);
-    this.renderer.setSize(w, h, false);
-    this.composer.setPixelRatio(this.pixelRatio);
-    this.composer.setSize(w, h);
-    this.bloomPass.resolution.set(w * this.quality.bloomScale, h * this.quality.bloomScale);
-    this.bloomPass.setSize(w * this.quality.bloomScale * this.pixelRatio, h * this.quality.bloomScale * this.pixelRatio);
+    this.renderer.setPixelRatio(pr);
+    // AnaglyphEffect.setSize also sizes the renderer, but writes inline px sizes onto the
+    // canvas; clear them so the canvas keeps following its CSS layout on later resizes
     this.anaglyph.setSize(w, h);
+    this.canvas.style.removeProperty('width');
+    this.canvas.style.removeProperty('height');
+    this.composer.setPixelRatio(pr);
+    this.composer.setSize(w, h);
+    const bloom = this.quality.bloomScale * pr;
+    this.bloomPass.setSize(w * bloom, h * bloom);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
   /** Distance at which a sphere of `radius` fills `fill` of the viewport (both axes considered). */
-  fitDistance(radius, fill = 0.78) {
+  fitDistance(radius: number, fill = 0.78): number {
     const vFov = THREE.MathUtils.degToRad(this.camera.fov);
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
     const dv = radius / Math.sin(vFov / 2) / fill;
@@ -217,8 +245,7 @@ export class Stage {
     return Math.max(dv, dh);
   }
 
-  /** Applies a {bloomThreshold, bloomStrength, exposure, shadows} look (see EngineView.look). */
-  setLook(look) {
+  setLook(look: Look): void {
     this.bloomPass.threshold = look.bloomThreshold;
     this.bloomPass.strength = look.bloomStrength;
     this.renderer.toneMappingExposure = look.exposure;
@@ -227,11 +254,11 @@ export class Stage {
     this.keyLight.shadow.needsUpdate = true;
   }
 
-  get postActive() {
+  get postActive(): boolean {
     return this.settings.bloom || this.settings.vignette;
   }
 
-  render(dt) {
+  render(dt: number): void {
     this.time += dt;
     const r = this.renderer;
     this.finishPass.uniforms.uTime.value = this.time % 10;

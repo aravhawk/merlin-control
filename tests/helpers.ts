@@ -1,9 +1,25 @@
 // Synthetic hand generator for tests: anatomically plausible 21-landmark hand.
-export function makeHand({ x = 0.5, y = 0.5, open = 1, rollDeg = 0, scale = 0.12, tiltX = 0, tiltY = 0 } = {}) {
+import type { RawHand } from '../src/tracking/handPipeline.ts';
+
+type P3 = [number, number, number];
+
+export interface HandSpec {
+  /** wrist position in normalised image coords */
+  x?: number;
+  y?: number;
+  /** 0 = fist, 1 = open palm */
+  open?: number;
+  rollDeg?: number;
+  scale?: number;
+  tiltX?: number;
+  tiltY?: number;
+}
+
+export function makeHand({ x = 0.5, y = 0.5, open = 1, rollDeg = 0, scale = 0.12, tiltX = 0, tiltY = 0 }: HandSpec = {}): Required<RawHand> {
   // hand local frame (metres): wrist at origin, fingers along +y (up), palm facing the camera (-z toward camera)
-  const mcp = { 5: [-0.03, 0.09], 9: [-0.005, 0.095], 13: [0.02, 0.09], 17: [0.042, 0.08] };
-  const seg = { 5: [0.04, 0.025, 0.02], 9: [0.045, 0.028, 0.022], 13: [0.042, 0.026, 0.02], 17: [0.032, 0.02, 0.018] };
-  const P = Array.from({ length: 21 }, () => [0, 0, 0]);
+  const mcp: Record<number, [number, number]> = { 5: [-0.03, 0.09], 9: [-0.005, 0.095], 13: [0.02, 0.09], 17: [0.042, 0.08] };
+  const seg: Record<number, P3> = { 5: [0.04, 0.025, 0.02], 9: [0.045, 0.028, 0.022], 13: [0.042, 0.026, 0.02], 17: [0.032, 0.02, 0.018] };
+  const P: P3[] = Array.from({ length: 21 }, (): P3 => [0, 0, 0]);
   P[0] = [0, 0, 0];
   // thumb
   P[1] = [-0.025, 0.02, 0];
@@ -29,7 +45,7 @@ export function makeHand({ x = 0.5, y = 0.5, open = 1, rollDeg = 0, scale = 0.12
   }
   // rotate (roll about z, tiltX about x, tiltY about y) and scale
   const r = (rollDeg * Math.PI) / 180;
-  const out = P.map(([px, py, pz]) => {
+  const out = P.map(([px, py, pz]): P3 => {
     let X = px * Math.cos(r) - py * Math.sin(r);
     let Y = px * Math.sin(r) + py * Math.cos(r);
     let Z = pz;

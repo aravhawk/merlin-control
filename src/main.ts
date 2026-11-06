@@ -1,40 +1,56 @@
 import * as THREE from 'three';
-import { createStore } from './state.js';
-import { Stage } from './scene/stage.js';
-import { EngineView } from './scene/engineView.js';
-import { buildMerlin } from './model/merlin.js';
-import { Rig, presetQuaternion } from './kinematics/rig.js';
-import { HandTracker, CameraError } from './tracking/handTracker.js';
-import { HandPipeline } from './tracking/handPipeline.js';
-import { GestureController } from './tracking/gestures.js';
-import { Sfx } from './audio/sfx.js';
-import { createHUD } from './ui/hud.js';
-import { Labels } from './ui/labels.js';
-import { PerfGovernor } from './perf.js';
-import { XRSupport } from './xr/xr.js';
+import { createStore } from './state.ts';
+import { Stage } from './scene/stage.ts';
+import { EngineView } from './scene/engineView.ts';
+import { buildMerlin } from './model/merlin.ts';
+import { Rig, presetQuaternion, type PresetName } from './kinematics/rig.ts';
+import { HandTracker, CameraError, type CameraErrorKind } from './tracking/handTracker.ts';
+import { HandPipeline } from './tracking/handPipeline.ts';
+import { GestureController, type GestureEvent } from './tracking/gestures.ts';
+import { Sfx } from './audio/sfx.ts';
+import { createHUD, type Hud, type HudActions, type GestureKey } from './ui/hud.ts';
+import { Labels } from './ui/labels.ts';
+import { PerfGovernor } from './perf.ts';
+import { XRSupport } from './xr/xr.ts';
+import type { BooleanKey, SettingKey, Settings } from './state.ts';
+
+/** A keyboard shortcut; `help` rows also populate the help overlay. */
+interface Shortcut {
+  keys: string[];
+  help?: readonly [string, string];
+  run: () => void;
+}
+
+declare global {
+  interface Window {
+    /** debugging handle */
+    __merlin?: Record<string, unknown>;
+  }
+}
+
+const byId = <T extends HTMLElement = HTMLElement>(id: string): T => {
+  const e = document.getElementById(id);
+  if (!e) throw new Error(`#${id} missing from index.html`);
+  return e as T;
+};
 
 // resolves after the browser has painted the current frame (rAF fires before paint; the timeout runs after it)
-const nextPaint = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
-const bootMsg = (m) => {
+const nextPaint = () => new Promise<void>((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+const bootMsg = (m: string) => {
   const e = document.getElementById('boot-msg');
   if (e) e.textContent = m;
 };
 
 async function init() {
   const store = createStore();
-  const stage = new Stage(document.getElementById('stage'));
+  const stage = new Stage(byId<HTMLCanvasElement>('stage'));
   stage.resize();
-  // registered before any await so a resize during boot is never missed
+  // observed before any await so a resize during boot is never missed; the canvas fills the
+  // viewport, so this covers window resizes, browser zoom, split view and emulated viewports
   let refit = () => {};
-  const onResize = () => {
+  new ResizeObserver(() => {
     stage.resize();
     refit();
-  };
-  window.addEventListener('resize', onResize);
-  // also catches size changes that don't fire window.resize (emulated viewports, split view, etc.)
-  new ResizeObserver(() => {
-    const c = stage.canvas;
-    if (c.clientWidth !== stage.size.w || c.clientHeight !== stage.size.h) onResize();
   }).observe(stage.canvas);
 
   await nextPaint();
@@ -59,14 +75,13 @@ async function init() {
   rig.setView(presetQuaternion('home'));
 
   // ── tracking ────────────────────────────────────────────────────────
-  const hudRoot = document.getElementById('ui');
-  let hud;
-  const onEvent = (e) => {
-    if (e.type === 'grab' || e.type === 'release' || e.type === 'catch' || e.type === 'flick') sfx.play(e.type);
-  };
+  // `hud` and `tracker` are created after the shortcut table they're referenced from
+  let hud!: Hud;
+  let tracker!: HandTracker;
+  let cameraStarting = false;
+  const onEvent = (e: GestureEvent) => sfx.play(e.type);
   const gestures = new GestureController(rig, getSettings, onEvent);
   const pipeline = new HandPipeline();
-  let tracker;
 
   const xr = new XRSupport({
     stage,
@@ -78,7 +93,7 @@ async function init() {
     onGrab: (t) => sfx.play(t),
   });
 
-  const actions = {
+  const actions: HudActions = {
     tick: () => sfx.play('ui'),
     preset(name) {
       rig.goTo({ view: presetQuaternion(name) });
@@ -93,27 +108,28 @@ async function init() {
     },
     toggleVR() {
       if (!xr.supported) return hud.toast('VR is not available in this browser');
-      if (xr.active) xr.exit();
-      else xr.enter().catch((e) => hud.toast(`VR failed: ${e.message}`));
+      if (xr.active) void xr.exit();
+      else xr.enter().catch((e: Error) => hud.toast(`VR failed: ${e.message}`));
     },
-    async toggleCamera() {
+    toggleCamera() {
       if (cameraStarting) return; // ignore repeat presses while permission / model load is pending
       if (tracker.active) stopCamera();
-      else await startCamera();
+      else void startCamera();
     },
   };
 
   // One table drives both the key handler and the help overlay, so they can't drift apart.
-  const cycle = (key, list) => store.set(key, list[(list.indexOf(store.get(key)) + 1) % list.length]);
-  const toggle = (key, on, off) => () => hud.toast(store.toggle(key) ? on : off);
-  const SHORTCUTS = [
+  const cycle = <K extends SettingKey>(key: K, list: readonly Settings[K][]) =>
+    store.set(key, list[(list.indexOf(store.get(key)) + 1) % list.length]);
+  const toggle = (key: BooleanKey, on: string, off: string) => () => hud.toast(store.toggle(key) ? on : off);
+  const SHORTCUTS: Shortcut[] = [
     { keys: ['1'], help: ['1 / 2 / 3', 'Wireframe · Solid · Solid + wire'], run: () => store.set('mode', 'wire') },
     { keys: ['2'], run: () => store.set('mode', 'solid') },
     { keys: ['3'], run: () => store.set('mode', 'both') },
     { keys: ['e'], help: ['E', 'Exploded view'], run: () => { actions.toggleExplode(); hud.toast(store.get('explode') > 0.5 ? 'Exploded view' : 'Assembled'); } },
-    ...['front', 'side', 'top', 'bottom', 'iso'].map((name, i) => ({
+    ...(['front', 'side', 'top', 'bottom', 'iso'] as const).map((name: PresetName, i): Shortcut => ({
       keys: [String(4 + i)],
-      help: i === 0 ? ['4 5 6 7 8', 'Front · Side · Top · Bottom · Isometric'] : null,
+      help: i === 0 ? ['4 5 6 7 8', 'Front · Side · Top · Bottom · Isometric'] : undefined,
       run: () => actions.preset(name),
     })),
     { keys: ['r'], help: ['R', 'Reset view'], run: () => actions.preset('home') },
@@ -132,21 +148,20 @@ async function init() {
     { keys: ['q'], help: ['Q', 'Cycle quality'], run: () => { cycle('quality', ['auto', 'low', 'medium', 'high']); hud.toast(`Quality: ${store.get('quality')}`); } },
     { keys: ['v'], help: ['V', 'Enter VR'], run: () => actions.toggleVR() },
     { keys: ['m'], help: ['M', 'Mute sound'], run: toggle('sound', 'Sound on', 'Sound muted') },
-    { keys: ['f'], help: ['F', 'Fullscreen'], run: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.().catch(() => {})) },
+    { keys: ['f'], help: ['F', 'Fullscreen'], run: () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.().catch(() => {})) },
     { keys: ['h'], help: ['H', 'Hide / show interface'], run: () => store.toggle('uiHidden') },
     { keys: ['?', '/'], help: ['?', 'This help'], run: () => hud.toggleHelp() },
   ];
 
-  hud = createHUD({ root: hudRoot, store, model, view, actions, shortcuts: SHORTCUTS.filter((sc) => sc.help).map((sc) => sc.help) });
+  const shortcuts = SHORTCUTS.flatMap((sc) => (sc.help ? [sc.help] : []));
+  hud = createHUD({ root: byId('ui'), store, model, view, actions, shortcuts });
   tracker = new HandTracker(hud.video);
-  const labels = new Labels(document.getElementById('labels'), view);
+  const labels = new Labels(byId('labels'), view);
 
-  let cameraStarting = false;
   async function startCamera() {
     if (tracker.active || cameraStarting) return;
     cameraStarting = true;
     hud.setCamera('starting');
-    hud.setGesture('starting');
     try {
       await tracker.start((msg) => hud.setCamera('starting', msg));
       pipeline.reset();
@@ -155,7 +170,7 @@ async function init() {
     } catch (err) {
       console.warn('[camera]', err);
       tracker.stop();
-      const msgs = {
+      const msgs: Partial<Record<CameraErrorKind, string>> = {
         denied: 'Camera permission was denied — allow camera access in your browser settings to control the engine.',
         notfound: 'No camera found. Connect a webcam to control the engine.',
         busy: 'The camera is in use by another application.',
@@ -163,7 +178,7 @@ async function init() {
         unsupported: 'This browser cannot access a camera.',
       };
       const kind = err instanceof CameraError ? err.kind : 'other';
-      hud.setCamera('off', msgs[kind] || `Hand tracking could not start (${err.message || err}).`);
+      hud.setCamera('off', msgs[kind] || `Hand tracking could not start (${err instanceof Error ? err.message : err}).`);
     } finally {
       cameraStarting = false;
     }
@@ -211,7 +226,7 @@ async function init() {
 
   // ── keyboard ────────────────────────────────────────────────────────
   const keyMap = new Map(SHORTCUTS.flatMap((sc) => sc.keys.map((k) => [k, sc.run])));
-  const isTextEntry = (el) => el?.isContentEditable || (el instanceof HTMLInputElement && !['range', 'checkbox'].includes(el.type));
+  const isTextEntry = (el: EventTarget | null) => (el instanceof HTMLElement && el.isContentEditable) || (el instanceof HTMLInputElement && !['range', 'checkbox'].includes(el.type));
   window.addEventListener('keydown', (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || isTextEntry(e.target)) return;
     const run = keyMap.get(e.key.length === 1 ? e.key.toLowerCase() : e.key);
@@ -232,7 +247,7 @@ async function init() {
   const aspectInv = () => tracker.aspectInv;
 
   /** The single place that positions the engine (and, on desktop, the camera) each frame. */
-  function placeRoot(t) {
+  function placeRoot(t: number): void {
     const root = view.root;
     if (xr.active) {
       // in VR the headset owns the camera; the engine floats where the user put it
@@ -260,7 +275,7 @@ async function init() {
     stage.focusDist = dist;
   }
 
-  function frame(nowMs) {
+  function frame(nowMs: number): void {
     const dt = THREE.MathUtils.clamp((nowMs - last) / 1000, 0.0005, 0.1);
     const t = nowMs / 1000;
     governor.tick(nowMs - last, nowMs);
@@ -290,8 +305,9 @@ async function init() {
     const spinning = rig.spinning && !rig.held;
     sfx.setSpin(rig.speed);
     hud.setSpin(rig.speed);
-    let gkey = 'off';
+    let gkey: GestureKey = 'off';
     if (xr.active) gkey = 'xr';
+    else if (cameraStarting) gkey = 'starting';
     else if (tracker.active) gkey = gestures.state;
     hud.setGesture(gkey, spinning);
     hud.tickFps(nowMs);
@@ -301,7 +317,7 @@ async function init() {
   stage.renderer.setAnimationLoop(frame);
 
   // reveal
-  document.getElementById('boot').classList.add('done');
+  byId('boot').classList.add('done');
   setTimeout(() => document.getElementById('boot')?.remove(), 1200);
   // a gentle intro spin that demonstrates the momentum model
   if (!matchMedia('(prefers-reduced-motion: reduce)').matches) rig.spin(new THREE.Vector3(0.35, 1.5, 0));

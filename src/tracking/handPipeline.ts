@@ -1,7 +1,7 @@
 /**
  * Raw MediaPipe landmarks → stable, filtered per-hand features.
  *
- * Pure JS (no DOM, no three) so it can be unit-tested with synthetic hands.
+ * Pure TypeScript (no DOM, no three) so it can be unit-tested with synthetic hands.
  *
  *  1. associate detections with persistent tracks (nearest wrist),
  *  2. One-Euro filter every landmark (normalised image coords + metric world coords),
@@ -11,10 +11,22 @@
  * "View space" = what the user sees in the mirrored preview: +x right, +y up,
  * +z towards the viewer. Positions are expressed in units of frame width.
  */
-import { OneEuroVec } from './oneEuro.js';
+import { OneEuroVec, type OneEuroParams, type Vec3Tuple } from './oneEuro.ts';
 
-export const LM = { WRIST: 0, THUMB_TIP: 4, INDEX_MCP: 5, INDEX_TIP: 8, MIDDLE_MCP: 9, MIDDLE_TIP: 12, RING_MCP: 13, RING_TIP: 16, PINKY_MCP: 17, PINKY_TIP: 20 };
-const FINGERS = [
+export interface Landmark {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** One detected hand: 21 normalised image landmarks + (optional) 21 metric world landmarks. */
+export interface RawHand {
+  landmarks: Landmark[];
+  world?: Landmark[];
+}
+
+export const LM = { WRIST: 0, THUMB_TIP: 4, INDEX_MCP: 5, INDEX_TIP: 8, MIDDLE_MCP: 9, MIDDLE_TIP: 12, RING_MCP: 13, RING_TIP: 16, PINKY_MCP: 17, PINKY_TIP: 20 } as const;
+const FINGERS: readonly (readonly [number, number])[] = [
   [LM.INDEX_MCP, LM.INDEX_TIP],
   [LM.MIDDLE_MCP, LM.MIDDLE_TIP],
   [LM.RING_MCP, LM.RING_TIP],
@@ -22,7 +34,20 @@ const FINGERS = [
 ];
 const PALM = [LM.WRIST, LM.INDEX_MCP, LM.MIDDLE_MCP, LM.RING_MCP, LM.PINKY_MCP];
 
-export const DEFAULTS = {
+export interface PipelineOptions {
+  imgFilter: OneEuroParams;
+  worldFilter: OneEuroParams;
+  extLo: number;
+  extHi: number;
+  openOn: number;
+  openOff: number;
+  openDwell: number;
+  closeDwell: number;
+  lostAfter: number;
+  matchDist: number;
+}
+
+export const DEFAULTS: PipelineOptions = {
   // One-Euro parameters tuned for 30 Hz camera input
   imgFilter: { minCutoff: 1.0, beta: 6, dCutoff: 1.0 }, // normalised image coordinates
   worldFilter: { minCutoff: 1.3, beta: 70, dCutoff: 1.0 }, // metres
@@ -40,36 +65,55 @@ export const DEFAULTS = {
 };
 
 /** Wrap an angle into (−π, π]. */
-export const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+export const wrapPi = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
 
-function dist3(a, b) {
+function dist3(a: Vec3Tuple, b: Vec3Tuple): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 }
 
-class Track {
-  constructor(id, opts) {
+const zeros = (): Vec3Tuple => [0, 0, 0];
+
+/** A persistent, filtered hand. */
+export class Track {
+  readonly id: number;
+  readonly img: OneEuroVec[];
+  readonly wld: OneEuroVec[];
+  /** filtered normalised image landmarks (x right, y down, unmirrored) */
+  readonly imgPts: Vec3Tuple[] = Array.from({ length: 21 }, zeros);
+  /** filtered metric world landmarks */
+  readonly wldPts: Vec3Tuple[] = Array.from({ length: 21 }, zeros);
+  /** palm centre in view space (frame widths, +y up) */
+  readonly palm = { x: 0, y: 0 };
+  /** smoothed 0 (fist) … 1 (open) */
+  openness = 0;
+  /** mean finger-extension ratio (raw input to `openness`) */
+  extension = 0;
+  /** clutch state after hysteresis */
+  open = false;
+  /** in-plane roll, unwrapped (rad) */
+  roll = 0;
+  lastSeen = 0;
+  frames = 0;
+  /** enough frames of data to be trusted */
+  stable = false;
+  matched = false;
+  flipSince: number | null = null;
+  rollRaw: number | null = null;
+
+  constructor(id: number, opts: PipelineOptions) {
     this.id = id;
-    this.opts = opts;
     this.img = Array.from({ length: 21 }, () => new OneEuroVec(3, opts.imgFilter));
     this.wld = Array.from({ length: 21 }, () => new OneEuroVec(3, opts.worldFilter));
-    this.imgPts = Array.from({ length: 21 }, () => [0, 0, 0]);
-    this.wldPts = Array.from({ length: 21 }, () => [0, 0, 0]);
-    this.openness = 0;
-    this.open = false;
-    this.flipSince = null;
-    this.rollRaw = null;
-    this.roll = 0;
-    this.lastSeen = 0;
-    this.frames = 0;
-    this.palm = { x: 0, y: 0 };
   }
 }
 
 export class HandPipeline {
-  constructor(opts = {}) {
+  readonly opts: PipelineOptions;
+  tracks: Track[] = [];
+  private nextId = 1;
+
+  constructor(opts: Partial<PipelineOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts };
-    this.tracks = [];
-    this.nextId = 1;
   }
 
   reset() {
@@ -77,19 +121,17 @@ export class HandPipeline {
   }
 
   /**
-   * @param {Array<{landmarks:{x,y,z}[], world:{x,y,z}[]}>} hands
-   * @param {number} t   seconds (monotonic)
-   * @param {number} aspectInv  video height / width
-   * @returns {Track[]} live tracks (those seen this frame first)
+   * Feeds one camera frame. `t` is a monotonic timestamp in seconds, `aspectInv` the
+   * video height / width. Returns the tracks seen this frame.
    */
-  update(hands, t, aspectInv = 0.75) {
+  update(hands: readonly RawHand[], t: number, aspectInv = 0.75): Track[] {
     const o = this.opts;
-    const seen = [];
+    const seen: Track[] = [];
     for (const tr of this.tracks) tr.matched = false;
 
     for (const h of hands) {
       const w0 = h.landmarks[LM.WRIST];
-      let best = null;
+      let best: Track | null = null;
       let bestD = o.matchDist;
       for (const tr of this.tracks) {
         if (tr.matched) continue;
@@ -113,7 +155,7 @@ export class HandPipeline {
     return seen;
   }
 
-  _process(tr, h, t, aspectInv) {
+  private _process(tr: Track, h: RawHand, t: number, aspectInv: number): void {
     const o = this.opts;
     tr.lastSeen = t;
     tr.frames++;

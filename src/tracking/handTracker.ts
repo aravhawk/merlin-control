@@ -1,19 +1,24 @@
 /**
  * Webcam + MediaPipe HandLandmarker wrapper.
  * Responsible only for getting raw landmarks out of the camera; everything
- * downstream (filtering, gestures) lives in handPipeline.js / gestures.js.
+ * downstream (filtering, gestures) lives in handPipeline.ts / gestures.ts.
  */
 // @mediapipe/tasks-vision is imported lazily (see loadModel) so the app boots without it.
+import type { HandLandmarker } from '@mediapipe/tasks-vision';
+import type { RawHand } from './handPipeline.ts';
+
+type StatusFn = (message: string) => void;
+export type CameraErrorKind = 'denied' | 'notfound' | 'insecure' | 'unsupported' | 'busy' | 'other';
 
 const BASE = import.meta.env.BASE_URL || '/';
 const LOCAL_WASM = `${BASE}wasm`;
 const LOCAL_MODEL = `${BASE}models/hand_landmarker.task`;
-// pinned to the installed package (injected by vite.config.js) so the WASM ABI always matches the JS loader
-const MP_VERSION = typeof __MEDIAPIPE_VERSION__ !== 'undefined' ? __MEDIAPIPE_VERSION__ : '1.2.2';
+// pinned to the installed package (injected by vite.config.ts) so the WASM ABI always matches the JS loader
+const MP_VERSION = __MEDIAPIPE_VERSION__;
 const CDN_WASM = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}/wasm`;
 const CDN_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-async function exists(url) {
+async function exists(url: string): Promise<boolean> {
   try {
     const r = await fetch(url, { method: 'HEAD' });
     const type = r.headers.get('content-type') || '';
@@ -24,25 +29,30 @@ async function exists(url) {
 }
 
 export class CameraError extends Error {
-  constructor(kind, message) {
+  readonly kind: CameraErrorKind;
+
+  constructor(kind: CameraErrorKind, message: string) {
     super(message);
-    this.kind = kind; // denied | notfound | insecure | unsupported | busy | other
+    this.kind = kind;
   }
 }
 
 export class HandTracker {
-  constructor(video) {
+  readonly video: HTMLVideoElement;
+  active = false;
+  delegate: '' | 'GPU' | 'CPU' = '';
+  private landmarker: HandLandmarker | null = null;
+  private stream: MediaStream | null = null;
+  private lastVideoTime = -1;
+  private lastTs = 0;
+  private _loading: Promise<void> | null = null;
+
+  constructor(video: HTMLVideoElement) {
     this.video = video;
-    this.landmarker = null;
-    this.stream = null;
-    this.active = false;
-    this.lastVideoTime = -1;
-    this.lastTs = 0;
-    this.delegate = '';
   }
 
   /** Loads once; concurrent callers share the same promise. */
-  loadModel(onStatus = () => {}) {
+  loadModel(onStatus: StatusFn = () => {}): Promise<void> {
     if (!this._loading) this._loading = this._loadModel(onStatus).catch((err) => {
       this._loading = null; // allow a retry after a failure
       throw err;
@@ -50,7 +60,7 @@ export class HandTracker {
     return this._loading;
   }
 
-  async _loadModel(onStatus) {
+  private async _loadModel(onStatus: StatusFn): Promise<void> {
     if (this.landmarker) return;
     onStatus('Loading hand-tracking model…');
     const { FilesetResolver, HandLandmarker } = await import('@mediapipe/tasks-vision');
@@ -58,7 +68,7 @@ export class HandTracker {
     const wasm = haveLocal ? LOCAL_WASM : CDN_WASM;
     const model = haveLocal ? LOCAL_MODEL : CDN_MODEL;
     const fileset = await FilesetResolver.forVisionTasks(wasm);
-    const make = (delegate) =>
+    const make = (delegate: 'GPU' | 'CPU') =>
       HandLandmarker.createFromOptions(fileset, {
         baseOptions: { modelAssetPath: model, delegate },
         runningMode: 'VIDEO',
@@ -77,7 +87,7 @@ export class HandTracker {
     }
   }
 
-  async start(onStatus = () => {}) {
+  async start(onStatus: StatusFn = () => {}): Promise<void> {
     if (!window.isSecureContext) throw new CameraError('insecure', 'Camera access needs HTTPS or localhost.');
     if (!navigator.mediaDevices?.getUserMedia) throw new CameraError('unsupported', 'This browser has no camera API.');
     await this.loadModel(onStatus);
@@ -88,8 +98,9 @@ export class HandTracker {
         video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, min: 24 } },
         audio: false,
       });
-    } catch (err) {
-      const map = { NotAllowedError: 'denied', PermissionDeniedError: 'denied', NotFoundError: 'notfound', OverconstrainedError: 'notfound', NotReadableError: 'busy' };
+    } catch (e) {
+      const err = e as DOMException;
+      const map: Record<string, CameraErrorKind> = { NotAllowedError: 'denied', PermissionDeniedError: 'denied', NotFoundError: 'notfound', OverconstrainedError: 'notfound', NotReadableError: 'busy' };
       throw new CameraError(map[err.name] || 'other', err.message || 'Camera unavailable');
     }
     this.video.srcObject = this.stream;
@@ -100,19 +111,19 @@ export class HandTracker {
     this.active = true;
   }
 
-  stop() {
+  stop(): void {
     this.active = false;
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.video.srcObject = null;
   }
 
-  get aspectInv() {
+  get aspectInv(): number {
     return this.video.videoWidth ? this.video.videoHeight / this.video.videoWidth : 0.75;
   }
 
-  /** Returns {hands, t(seconds)} when a new camera frame was analysed, else null. */
-  detect() {
+  /** Returns the detected hands and a timestamp (s) when a new camera frame was analysed, else null. */
+  detect(): { hands: RawHand[]; t: number } | null {
     if (!this.active || !this.landmarker) return null;
     const v = this.video;
     if (v.readyState < 2 || v.currentTime === this.lastVideoTime) return null;
@@ -127,9 +138,9 @@ export class HandTracker {
       console.warn('[tracker] detect failed', err);
       return null;
     }
-    const hands = (res.landmarks || []).map((lm, i) => ({
+    const hands: RawHand[] = (res.landmarks || []).map((lm, i) => ({
       landmarks: lm,
-      world: res.worldLandmarks?.[i] ?? lm,
+      world: res.worldLandmarks?.[i],
     }));
     return { hands, t: ts / 1000 };
   }

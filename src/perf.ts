@@ -3,34 +3,38 @@
  * tier down when the GPU can't hold ~50 fps; cautiously steps back up once
  * if there is lots of headroom. (Stepping is rate-limited to avoid flapping.)
  */
-const LEVELS = ['low', 'medium', 'high'];
+export const LEVELS = ['low', 'medium', 'high'] as const;
+export type QualityLevel = (typeof LEVELS)[number];
 
 export class PerfGovernor {
-  constructor(onLevel, start = 'high') {
+  enabled = true;
+  level: number;
+  private readonly onLevel: (level: QualityLevel) => void;
+  private readonly samples: number[] = [];
+  private lastChange = performance.now();
+  private downgrades = 0;
+  private slowRuns = 0;
+  private fastRuns = 0;
+
+  constructor(onLevel: (level: QualityLevel) => void, start: QualityLevel = 'high') {
     this.onLevel = onLevel;
     this.level = LEVELS.indexOf(start);
-    this.enabled = true;
-    this.samples = [];
-    this.lastChange = performance.now();
-    this.downgrades = 0;
-    this.slowRuns = 0;
-    this.fastRuns = 0;
   }
 
-  setEnabled(v) {
+  setEnabled(v: boolean): void {
     this.enabled = v;
     this.samples.length = 0;
     this.slowRuns = this.fastRuns = 0;
   }
 
-  setLevel(name) {
+  setLevel(name: QualityLevel): void {
     this.level = Math.max(0, LEVELS.indexOf(name));
   }
 
-  /** @param {number} dtMs frame time in ms @param {number} now ms */
-  tick(dtMs, now) {
+  /** `dtMs` is the last frame time, `now` the current timestamp (both ms). */
+  tick(dtMs: number, now: number): void {
     if (!this.enabled) return;
-    if (dtMs > 250) return; // tab switch / hitch — ignore
+    if (dtMs <= 0 || dtMs > 250) return; // first frame / tab switch / hitch — ignore
     this.samples.push(dtMs);
     if (this.samples.length < 90) return;
     const avg = this.samples.reduce((a, b) => a + b, 0) / this.samples.length;

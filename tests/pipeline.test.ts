@@ -1,15 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HandPipeline } from '../src/tracking/handPipeline.js';
-import { GestureController } from '../src/tracking/gestures.js';
-import { Rig } from '../src/kinematics/rig.js';
-import { OneEuro } from '../src/tracking/oneEuro.js';
-import { makeHand } from './helpers.js';
+import { Quaternion, Vector3 } from 'three';
+import { HandPipeline, type RawHand, type Track } from '../src/tracking/handPipeline.ts';
+import { GestureController, type GestureEvent } from '../src/tracking/gestures.ts';
+import { Rig } from '../src/kinematics/rig.ts';
+import { OneEuro } from '../src/tracking/oneEuro.ts';
+import { makeHand } from './helpers.ts';
 
 const FPS = 30;
 const settings = () => ({ sensitivity: 1, invertZoom: false });
 
-function rng(seed) {
+function rng(seed: number): () => number {
   let s = seed;
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296 - 0.5);
 }
@@ -29,12 +30,12 @@ test('One-Euro filter removes jitter on a still signal but tracks fast motion', 
 test('openness separates open palm from fist and the clutch has hysteresis (no flicker)', () => {
   const p = new HandPipeline();
   let t = 0;
-  const step = (open) => {
+  const step = (open: number): Track => {
     t += 1 / FPS;
     return p.update([makeHand({ open })], t)[0];
   };
-  let tr;
-  for (let i = 0; i < 10; i++) tr = step(1);
+  let tr = step(1);
+  for (let i = 0; i < 9; i++) tr = step(1);
   assert.equal(tr.open, true);
   assert.ok(tr.extension > 1.5, `open ext ${tr.extension}`);
   for (let i = 0; i < 10; i++) tr = step(0);
@@ -53,7 +54,7 @@ test('openness separates open palm from fist and the clutch has hysteresis (no f
   assert.ok(flips <= 2, `state flipped ${flips} times while hovering`);
 });
 
-function drive(frames, gc, p, t0 = 0) {
+function drive(frames: RawHand[][], gc: GestureController, p: HandPipeline, t0 = 0): number {
   let t = t0;
   for (const hands of frames) {
     t += 1 / FPS;
@@ -66,9 +67,9 @@ function drive(frames, gc, p, t0 = 0) {
 test('grab → rotate follows hand motion; fist release without motion gives no spin', () => {
   const rig = new Rig();
   const p = new HandPipeline();
-  const events = [];
+  const events: GestureEvent['type'][] = [];
   const gc = new GestureController(rig, settings, (e) => events.push(e.type));
-  const frames = [];
+  const frames: RawHand[][] = [];
   for (let i = 0; i < 12; i++) frames.push([makeHand({ open: 1, x: 0.5, y: 0.5 })]);
   // slowly move right
   for (let i = 0; i < 30; i++) frames.push([makeHand({ open: 1, x: 0.5 + i * 0.004, y: 0.5 })]);
@@ -88,10 +89,10 @@ test('grab → rotate follows hand motion; fist release without motion gives no 
 test('fast movement then closing the fist imparts spin; reopening catches it smoothly', () => {
   const rig = new Rig();
   const p = new HandPipeline();
-  const events = [];
+  const events: GestureEvent['type'][] = [];
   const gc = new GestureController(rig, settings, (e) => events.push(e.type));
   let t = 0;
-  const frames = [];
+  const frames: RawHand[][] = [];
   for (let i = 0; i < 12; i++) frames.push([makeHand({ open: 1, x: 0.3, y: 0.5 })]);
   // fast sweep (~3 frame-widths/s) while hand starts closing at the end
   for (let i = 0; i < 14; i++) frames.push([makeHand({ open: 1, x: 0.3 + i * 0.03, y: 0.5 })]);
@@ -106,7 +107,7 @@ test('fast movement then closing the fist imparts spin; reopening catches it smo
   const w1 = rig.omega.length();
   assert.ok(w1 < w0 && w1 > 0.5 * w0, `light damping ${w0} → ${w1}`);
   // reopen palm → catch
-  const frames2 = [];
+  const frames2: RawHand[][] = [];
   for (let i = 0; i < 6; i++) frames2.push([makeHand({ open: 1, x: 0.5, y: 0.5 })]);
   t = drive(frames2, gc, p, t);
   assert.ok(events.includes('catch'));
@@ -121,8 +122,8 @@ test('two open hands: spreading changes zoom, midpoint pans', () => {
   const rig = new Rig();
   const p = new HandPipeline();
   const gc = new GestureController(rig, settings);
-  const frames = [];
-  const two = (sep, cx, cy) => [makeHand({ open: 1, x: cx - sep / 2, y: cy }), makeHand({ open: 1, x: cx + sep / 2, y: cy })];
+  const frames: RawHand[][] = [];
+  const two = (sep: number, cx: number, cy: number) => [makeHand({ open: 1, x: cx - sep / 2, y: cy }), makeHand({ open: 1, x: cx + sep / 2, y: cy })];
   for (let i = 0; i < 10; i++) frames.push(two(0.4, 0.5, 0.5));
   for (let i = 0; i < 20; i++) frames.push(two(0.4 - i * 0.008, 0.5 + i * 0.004, 0.5));
   drive(frames, gc, p);
@@ -131,13 +132,13 @@ test('two open hands: spreading changes zoom, midpoint pans', () => {
   assert.ok(Math.abs(rig.panTarget.x) > 0.02, `pan ${rig.panTarget.x}`);
 });
 
-test('mouse-style flick via rig API and click-to-catch', () => {
+test('rig API: a flick imparts spin and stopSpin catches it', () => {
   const rig = new Rig();
   rig.beginGrab();
   let t = 0;
   for (let i = 0; i < 12; i++) {
     t += 0.016;
-    rig.addRotation(rig.view.clone().identity().setFromAxisAngle({ x: 0, y: 1, z: 0 }, 0.05), 0.016, t);
+    rig.addRotation(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), 0.05), 0.016, t);
     rig.update(0.016);
   }
   rig.endGrab(t, { from: 0.12, to: 0 });
@@ -145,4 +146,24 @@ test('mouse-style flick via rig API and click-to-catch', () => {
   rig.stopSpin();
   for (let i = 0; i < 80; i++) rig.update(1 / 60);
   assert.ok(rig.omega.length() < 0.02);
+});
+
+test('switching model ⇄ orbit keeps the pan offset on screen', () => {
+  const rig = new Rig();
+  rig.panBy(0.3, -0.2);
+  for (let i = 0; i < 120; i++) rig.update(1 / 60);
+  const halfH = rig.cameraDist * rig.tanHalfFov;
+  const halfW = halfH * rig.aspect;
+
+  rig.setMode('orbit');
+  assert.equal(rig.pan.x, 0);
+  assert.ok(Math.abs(rig.target.x + 0.3 * halfW) < 1e-3 && Math.abs(rig.target.y - 0.2 * halfH) < 1e-3, 'pan becomes the orbit target');
+
+  // orbit the camera, then check the model centre's screen offset survives the switch back
+  rig.addRotation(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), 0.6), 0.1, 1);
+  for (let i = 0; i < 120; i++) rig.update(1 / 60);
+  const inCam = rig.target.clone().negate().applyQuaternion(rig.qc.clone().invert());
+  rig.setMode('model');
+  assert.ok(Math.abs(rig.pan.x * halfW - inCam.x) < 1e-3 && Math.abs(rig.pan.y * halfH - inCam.y) < 1e-3, `pan ${rig.pan.x}, ${rig.pan.y}`);
+  assert.equal(rig.target.lengthSq(), 0);
 });

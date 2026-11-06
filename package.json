@@ -1,26 +1,33 @@
 {
   "name": "merlin-control",
   "version": "1.0.0",
-  "description": "Interactive 3D hand-tracked Merlin 1D visualizer \u2014 a modern recreation of SpaceX's 2013 'Future of Design' demo.",
+  "description": "Interactive 3D hand-tracked Merlin 1D visualizer — a modern recreation of SpaceX's 2013 'Future of Design' demo.",
   "private": true,
   "type": "module",
   "scripts": {
-    "setup": "node scripts/fetch-assets.mjs",
-    "postinstall": "node scripts/fetch-assets.mjs",
-    "dev": "node scripts/fetch-assets.mjs && vite",
-    "build": "node scripts/fetch-assets.mjs && vite build",
+    "setup": "node scripts/fetch-assets.ts",
+    "postinstall": "node scripts/fetch-assets.ts",
+    "dev": "node scripts/fetch-assets.ts && vite",
+    "build": "node scripts/fetch-assets.ts && tsc && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/",
-    "model:stats": "node scripts/model-stats.mjs",
-    "lan": "node scripts/fetch-assets.mjs && vite build && HTTPS=1 vite preview --host --port 4173",
-    "lan:dev": "HTTPS=1 vite --host --port 5173"
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "model:stats": "node scripts/model-stats.ts",
+    "lan": "node scripts/fetch-assets.ts && vite build && HTTPS=1 vite preview --host --port 4173",
+    "lan:dev": "HTTPS=1 vite --host --port 5173",
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.2.2",
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/three": "^0.187.0",
     "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "typescript": "^7.0.2",
     "vite": "^8.3.5"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

@@ -17,6 +17,7 @@
  *   'orbit' – the camera orbits the model
  */
 import { Quaternion, Vector3, MathUtils } from 'three';
+import type { RotationMode } from '../state.ts';
 
 const _axis = new Vector3();
 const _q = new Quaternion();
@@ -26,7 +27,9 @@ const _qr = new Quaternion(); // scratch used only by _rotate
 const _qd = new Quaternion(); // per-frame applied delta
 const IDENTITY = new Quaternion();
 
-export const PRESETS = {
+export type PresetName = 'home' | 'front' | 'side' | 'top' | 'bottom' | 'iso';
+
+export const PRESETS: Record<PresetName, { yaw: number; pitch: number }> = {
   home: { yaw: -28, pitch: 12 },
   front: { yaw: 0, pitch: 0 },
   side: { yaw: -90, pitch: 0 },
@@ -35,78 +38,98 @@ export const PRESETS = {
   iso: { yaw: -42, pitch: 26 },
 };
 
-export function presetQuaternion(name) {
-  const p = PRESETS[name] ?? PRESETS.home;
+export function presetQuaternion(name: PresetName): Quaternion {
+  const p = PRESETS[name];
   const qy = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), MathUtils.degToRad(p.yaw));
   const qx = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), MathUtils.degToRad(p.pitch));
   return qx.multiply(qy);
 }
 
 /** Fraction of the remaining gap to close this frame for an exponential follow with time constant `tau`. */
-const follow = (dt, tau) => 1 - Math.exp(-dt / tau);
+const follow = (dt: number, tau: number): number => 1 - Math.exp(-dt / tau);
 const _w = new Vector3();
 
 /** small-angle rotation vector → quaternion (axis*angle) */
-export function quatFromRotationVector(v, out = new Quaternion()) {
+export function quatFromRotationVector(v: Vector3, out: Quaternion = new Quaternion()): Quaternion {
   const a = v.length();
   if (a < 1e-9) return out.identity();
   _axis.copy(v).multiplyScalar(1 / a);
   return out.setFromAxisAngle(_axis, a);
 }
 
+interface Vec2 {
+  x: number;
+  y: number;
+}
+/** Raw angular-velocity sample (rad/s at time `t`, seconds). */
+interface Sample {
+  t: number;
+  w: Vector3;
+}
+interface Goal {
+  view: Quaternion;
+  dist: number;
+  pan: Vec2;
+}
+
+export interface EndGrabOptions {
+  /** lookback window start, seconds before release */
+  from?: number;
+  /** lookback window end, seconds before release */
+  to?: number;
+  /** convert the measured velocity into free spin */
+  flick?: boolean;
+}
+
 export class Rig {
-  constructor() {
-    this.mode = 'model';
+  mode: RotationMode = 'model';
 
-    this.q = new Quaternion(); // model orientation (model mode)
-    this.qc = new Quaternion(); // camera orbit orientation (orbit mode)
-    this.view = new Quaternion(); // effective view orientation = qc⁻¹ · q
+  readonly q = new Quaternion(); // model orientation (model mode)
+  readonly qc = new Quaternion(); // camera orbit orientation (orbit mode)
+  readonly view = new Quaternion(); // effective view orientation = qc⁻¹ · q
 
-    this.pending = new Quaternion(); // rotation requested but not yet applied
-    this.omega = new Vector3(); // free-spin angular velocity (rad/s, view frame)
-    this.appliedSpeed = 0; // measured angular speed of what was applied last frame
-    this.catching = false; // a catch is in progress: spin decays fast until it reaches zero
+  readonly pending = new Quaternion(); // rotation requested but not yet applied
+  readonly omega = new Vector3(); // free-spin angular velocity (rad/s, view frame)
+  appliedSpeed = 0; // measured angular speed of what was applied last frame
+  catching = false; // a catch is in progress: spin decays fast until it reaches zero
 
-    // distances are set by the app's framing (setHome); these are placeholders
-    this.dist = 7;
-    this.distTarget = 7;
-    this.homeDist = 7;
-    this.minDist = 2.8;
-    this.maxDist = 24;
-    this.frameScale = 1; // extra camera pull-back requested by the view (e.g. exploded parts)
+  // distances are set by the app's framing (setHome); these are placeholders
+  dist = 7;
+  distTarget = 7;
+  homeDist = 7;
+  minDist = 2.8;
+  maxDist = 24;
+  frameScale = 1; // extra camera pull-back requested by the view (e.g. exploded parts)
 
-    this.pan = { x: 0, y: 0 }; // NDC offset of the model (model mode)
-    this.panTarget = { x: 0, y: 0 };
-    this.target = new Vector3(); // orbit-mode look-at point
-    this.targetGoal = new Vector3();
-    this.tanHalfFov = Math.tan(MathUtils.degToRad(17));
-    this.aspect = 1.6;
+  readonly pan: Vec2 = { x: 0, y: 0 }; // NDC offset of the model (model mode)
+  readonly panTarget: Vec2 = { x: 0, y: 0 };
+  readonly target = new Vector3(); // orbit-mode look-at point
+  readonly targetGoal = new Vector3();
+  tanHalfFov = Math.tan(MathUtils.degToRad(17));
+  aspect = 1.6;
 
-    this.held = false;
-    this.history = []; // {t, w:Vector3} raw angular velocity samples (seconds)
-    this._pool = [];
-    this.goal = null;
+  held = false;
+  private readonly history: Sample[] = [];
+  private readonly _pool: Sample[] = [];
+  private goal: Goal | null = null;
 
-    // tunables
-    this.followTau = 0.075; // s — how quickly pending rotation is consumed
-    this.spinTau = 3.2; // s — exponential damping of free spin
-    this.catchTau = 0.14; // s — how fast a catch kills the spin
-    this.panTau = 0.12;
-    this.zoomTau = 0.14;
-    this.maxSpin = 16; // rad/s
-    this.minSpin = 0.9; // below this a release does not start a spin
-
-    this.view.copy(this.q);
-  }
+  // tunables
+  followTau = 0.075; // s — how quickly pending rotation is consumed
+  spinTau = 3.2; // s — exponential damping of free spin
+  catchTau = 0.14; // s — how fast a catch kills the spin
+  panTau = 0.12;
+  zoomTau = 0.14;
+  maxSpin = 16; // rad/s
+  minSpin = 0.9; // below this a release does not start a spin
 
   // ── orientation helpers ────────────────────────────────────────────
-  _syncView() {
+  private _syncView(): void {
     // view = qc⁻¹ · q
     this.view.copy(this.qc).invert().multiply(this.q).normalize();
   }
 
   /** Apply a view-frame rotation. */
-  _rotate(dq) {
+  private _rotate(dq: Quaternion): void {
     if (this.mode === 'model') {
       this.q.premultiply(dq).normalize();
     } else {
@@ -117,29 +140,49 @@ export class Rig {
     this._syncView();
   }
 
-  setMode(mode) {
+  setMode(mode: RotationMode): void {
     if (mode === this.mode) return;
-    // keep the picture identical across the switch
+    // keep the picture identical across the switch, including any pan: model mode stores it as
+    // a screen-space offset of the model, orbit mode as the camera target (in the qc frame)
+    const halfH = this.cameraDist * this.tanHalfFov;
+    const halfW = halfH * this.aspect;
+    if (mode === 'orbit') {
+      // qc becomes identity below, so the target is simply the opposite of the screen offset
+      this.target.set(-this.pan.x * halfW, -this.pan.y * halfH, 0);
+      this.targetGoal.set(-this.panTarget.x * halfW, -this.panTarget.y * halfH, 0);
+      this.pan.x = this.pan.y = this.panTarget.x = this.panTarget.y = 0;
+    } else {
+      _qr.copy(this.qc).invert();
+      const toPan = (v: Vector3, out: Vec2) => {
+        _axis.copy(v).applyQuaternion(_qr);
+        out.x = MathUtils.clamp(-_axis.x / halfW, -1.4, 1.4);
+        out.y = MathUtils.clamp(-_axis.y / halfH, -1.4, 1.4);
+      };
+      toPan(this.target, this.pan);
+      toPan(this.targetGoal, this.panTarget);
+      this.target.set(0, 0, 0);
+      this.targetGoal.set(0, 0, 0);
+    }
     this.q.copy(this.view);
     this.qc.identity();
     this.mode = mode;
     this._syncView();
   }
 
-  setView(qv) {
+  setView(qv: Quaternion): void {
     if (this.mode === 'model') this.q.copy(qv);
     else this.qc.copy(this.q).multiply(_qs.copy(qv).invert());
     this._syncView();
   }
 
-  clearHistory() {
+  clearHistory(): void {
     for (const h of this.history) this._pool.push(h);
     this.history.length = 0;
   }
 
   // ── input API ──────────────────────────────────────────────────────
   /** Clutch engaged. Catches any free spin. */
-  beginGrab() {
+  beginGrab(): void {
     this.held = true;
     this.catching = this.spinning; // a catch keeps decaying even if the grab is brief
     this.goal = null;
@@ -151,12 +194,12 @@ export class Rig {
    * Feed a rotation delta (view frame) that occurred over `dt` seconds at time `t` (s).
    * `weight` softly fades the delta (clutch engagement) without polluting flick history.
    */
-  addRotation(dq, dt, t, weight = 1) {
+  addRotation(dq: Quaternion, dt: number, t: number, weight = 1): void {
     if (dt > 1e-4) {
       const angle = 2 * Math.acos(MathUtils.clamp(dq.w, -1, 1));
       const s = Math.sqrt(Math.max(0, 1 - dq.w * dq.w));
       // drop expired samples into a pool so steady tracking doesn't allocate per update
-      while (this.history.length >= 40 || (this.history.length && t - this.history[0].t > 0.6)) this._pool.push(this.history.shift());
+      while (this.history.length >= 40 || (this.history.length && t - this.history[0].t > 0.6)) this._pool.push(this.history.shift()!);
       const sample = this._pool.pop() ?? { t: 0, w: new Vector3() };
       sample.t = t;
       sample.w.set(0, 0, 0);
@@ -176,13 +219,13 @@ export class Rig {
    * converts it into free spin. `from`/`to` bound the lookback window in seconds
    * before `tRelease` (skip the last few ms — that is where a closing fist disturbs tracking).
    */
-  endGrab(tRelease, { from = 0.3, to = 0.05, flick = true } = {}) {
+  endGrab(tRelease: number, { from = 0.3, to = 0.05, flick = true }: EndGrabOptions = {}): void {
     this.held = false;
     if (!flick) {
       this.clearHistory();
       return;
     }
-    let sum = new Vector3();
+    const sum = new Vector3();
     let wsum = 0;
     for (const s of this.history) {
       const age = tRelease - s.t;
@@ -201,23 +244,23 @@ export class Rig {
   }
 
   /** Start a free spin (view-frame angular velocity, rad/s). The single entry point for spins. */
-  spin(omega) {
+  spin(omega: Vector3): void {
     this.omega.copy(omega);
     this.catching = false;
   }
 
   /** Start catching a spin (eased stop), e.g. from the Space key. */
-  stopSpin() {
+  stopSpin(): void {
     this.catching = this.spinning;
   }
 
   /** Actual camera distance: the user's zoom times the view's framing scale. */
-  get cameraDist() {
+  get cameraDist(): number {
     return this.dist * this.frameScale;
   }
 
   /** Sets the framing distance, keeping the user's current zoom ratio. */
-  setHome(home) {
+  setHome(home: number): void {
     const k = home / this.homeDist;
     this.homeDist = home;
     this.minDist = home * 0.32;
@@ -226,13 +269,13 @@ export class Rig {
     this.distTarget *= k;
   }
 
-  zoomBy(factor) {
+  zoomBy(factor: number): void {
     this.goal = null;
     this.distTarget = MathUtils.clamp(this.distTarget * factor, this.minDist, this.maxDist);
   }
 
   /** screen-space pan in NDC units (x right, y up) */
-  panBy(dx, dy) {
+  panBy(dx: number, dy: number): void {
     this.goal = null;
     if (this.mode === 'orbit') {
       const halfH = this.cameraDist * this.tanHalfFov;
@@ -245,18 +288,18 @@ export class Rig {
   }
 
   /** Smoothly fly to a preset / explicit view. */
-  goTo({ view, dist = this.homeDist, pan = { x: 0, y: 0 } }) {
+  goTo({ view, dist = this.homeDist, pan = { x: 0, y: 0 } }: { view: Quaternion; dist?: number; pan?: Vec2 }): void {
     this.goal = { view: view.clone(), dist, pan };
     this.omega.set(0, 0, 0);
     this.pending.identity();
   }
 
-  get spinning() {
+  get spinning(): boolean {
     return this.omega.lengthSq() > 0.05 * 0.05;
   }
 
   // ── integration ────────────────────────────────────────────────────
-  update(dt) {
+  update(dt: number): void {
     dt = Math.min(dt, 0.1);
     const prevView = _qp.copy(this.view);
 
@@ -312,7 +355,7 @@ export class Rig {
   }
 
   /** Overall angular speed (rad/s) used for audio/UI feedback. */
-  get speed() {
+  get speed(): number {
     return Math.max(this.omega.length(), this.appliedSpeed);
   }
 }

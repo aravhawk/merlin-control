@@ -1,141 +1,119 @@
-# Merlin 1D — hand-controlled 3D visualizer
+# Merlin 1D
 
-A browser recreation of the core of SpaceX's 2013 *"The Future of Design"* demo
-([video](https://www.youtube.com/watch?v=xNqs_S-zEBY)): a dense wireframe Merlin 1D floating in space that you
-grab, rotate, zoom, pan, flick into a free-spin and catch — using nothing but your webcam and one open hand.
-It also has a PBR solid mode, exploded view, part isolation, annotations, and holographic/anaglyph/VR modes.
-The engine is manipulated with your hands only — there is no mouse or touch control.
+A wireframe SpaceX Merlin 1D engine floating in space, driven entirely by your bare hands through a webcam. Grab it, rotate it, zoom and pan with two hands, flick it into a free spin, then catch it.
 
-Vanilla JS + [Three.js](https://threejs.org) + [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker), bundled with Vite.
+It's a browser take on the core of SpaceX's 2013 [*The Future of Design*](https://www.youtube.com/watch?v=xNqs_S-zEBY) demo, built with TypeScript, [Three.js](https://threejs.org) and [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker).
 
-## Run
+## Quick start
+
+Requires Node.js 22.18 or newer.
 
 ```bash
-npm install        # also copies the MediaPipe WASM and downloads the hand model into public/
-npm run dev        # http://localhost:5173
+npm install   # also fetches the MediaPipe WASM runtime and hand model into public/
+npm run dev   # → http://localhost:5173
 ```
 
-```bash
-npm run build      # production bundle in dist/ (fully self-contained, hand model + WASM included)
-npm run preview    # serve dist/
-npm test           # unit tests (filtering, gestures, kinematics) — no browser needed
-npm run model:stats  # per-assembly edge / triangle counts of the procedural model
-```
+Press **Hand tracking** (or `C`) and allow camera access. Hand tracking is the only way to move the engine. The mouse and touch screen don't control it. Keyboard shortcuts still work without a camera.
 
-Click **Enable hand tracking** (or press `C`) and allow camera access. The camera needs `localhost` or HTTPS.
-Without a camera the engine can't be grabbed; keyboard shortcuts (views, presets, explode, spin catch) still work.
+## Controls
 
-## Hand gestures
+### Hands
 
 | Gesture | Effect |
-|---|---|
-| **Open palm** | *Grab* (clutch engaged). The engine follows your hand: move to orbit it, twist your hand to roll it |
-| **Fist** | *Release*. Reposition your hand freely; nothing moves |
-| **Fast move, then close your fist** | *Flick* — the measured angular velocity becomes a free-spin with light damping |
-| **Open palm while it spins** | *Catch* — the spin eases to zero in a fraction of a second |
-| **Two open palms** | Spread your hands apart to zoom in, bring them together to zoom out (flip it with *Invert two-hand zoom* in Settings), move both to pan, twist the pair to roll |
+| --- | --- |
+| Open palm | **Grab.** Move your hand to rotate the engine; twist it to roll. |
+| Fist | **Release.** Reposition your hand without moving anything. |
+| Move fast, then close your fist | **Flick.** The engine keeps spinning with your hand's momentum. |
+| Open palm while it spins | **Catch.** The spin eases to a stop. |
+| Two open palms | Spread apart to zoom in, move together to pan, twist to roll. |
 
-The gesture card (bottom-left) shows the current state and a momentum bar; the camera preview shows the tracked skeleton
-(cyan = grabbing, amber = released) and an openness gauge per hand. `T` hides the preview, `H` hides all UI.
+The gesture card shows what the tracker sees. The camera preview draws your hand skeleton in cyan while grabbing and amber while released.
 
-## Keyboard
+For best tracking, light your hand evenly and keep it 40 to 80 cm from the camera with your palm facing it.
+
+### Keyboard
 
 | Key | Action | Key | Action |
-|---|---|---|---|
-| `1` `2` `3` | Wireframe · Solid · Solid + wire | `C` | Hand tracking on/off |
-| `E` | Exploded view | `T` | Camera preview on/off |
-| `4` `5` `6` `7` `8` | Front · Side · Top · Bottom · Isometric | `L` | Part labels |
-| `R` | Reset view | `I` / `Esc` | Clear isolate / close drawer or help |
-| `Space` | Catch / stop the spin | `G` | Holographic glass |
-| `O` | Rotate the model ⇄ orbit the camera | `A` | Anaglyph (red/cyan) |
-| `B` | Bloom | `V` | Enter VR |
-| `Q` | Cycle quality (auto/low/med/high) | `M` | Mute |
-| `F` | Fullscreen | `H` | Hide / show UI |
-| `P` | Parts drawer | `S` | Settings drawer |
+| --- | --- | --- | --- |
+| `1` `2` `3` | Wireframe · solid · both | `C` | Hand tracking on / off |
+| `4`–`8` | Front · side · top · bottom · iso | `T` | Camera preview |
+| `R` | Reset view | `L` | Part labels |
+| `E` | Exploded view | `P` | Parts drawer |
+| `Space` | Stop the spin | `S` | Settings drawer |
+| `O` | Rotate model ⇄ orbit camera | `G` | Holographic glass |
+| `B` | Glow | `A` | Anaglyph 3D (red / cyan) |
+| `Q` | Cycle render quality | `V` | Enter VR (when available) |
+| `M` | Mute | `F` | Fullscreen |
+| `I` / `Esc` | Clear isolation · close panels | `H` | Hide interface |
 | `?` | Help | | |
 
-Open **Parts** (top-right, or `P`) and hover a part to highlight it, click to isolate it (everything else ghosts out). **Settings** (`S`) holds display, quality, sensitivity and zoom-direction options.
+In the **Parts** drawer, hover over a part to highlight it or click it to isolate it. **Settings** holds display, quality, sensitivity and zoom-direction options.
+
+## How it works
+
+```
+webcam ─▶ HandLandmarker ─▶ HandPipeline ─▶ GestureController ─▶ Rig ─▶ scene
+          21 landmarks       filtering,      grab / release /     quaternion
+          per hand           openness,       flick / catch        kinematics
+                             clutch
+```
+
+- **Filtering:** every landmark passes through a [One-Euro filter](https://gery.casiez.net/1euro/). It smooths heavily when your hand is still and lightly when it moves fast.
+- **Open or closed:** openness is the finger-extension ratio `|tip − wrist| / |knuckle − wrist|`, measured on MediaPipe's metric 3-D landmarks. That makes it independent of viewing angle. A Schmitt trigger with a short dwell time turns it into a clutch that never flickers.
+- **Gestures:** a small state machine maps one hand to rotation and two hands to zoom, pan and roll. When your hand closes, the clutch fades the motion out, so making a fist never drags the model. Flick velocity is sampled from just *before* the hand started closing.
+- **Motion:** all orientation is stored as quaternions. Input adds rotation deltas to a pending accumulator, and the rig consumes it with critically-damped smoothing. This gives the engine weight, keeps it from drifting, and records the velocity that a release turns into free spin.
+
+To tune the feel, edit `GAINS` in `tracking/gestures.ts`, `DEFAULTS` in `tracking/handPipeline.ts`, or the time constants on `Rig`.
 
 ## The model
 
-The engine is **generated procedurally at load time** (~0.2 s) — no external mesh, no licensing questions. `src/model/geom.js`
-is a small CAD-style kit (surfaces of revolution, swept tubes, fillet paths, hex bolts, …) and `src/model/merlin.js`
-assembles the Merlin 1D from it:
+There are no mesh files. The engine is generated procedurally at load time from a small CAD-style kit in `model/geom.ts`: surfaces of revolution, swept tubes, filleted paths and bolt patterns. `model/merlin.ts` assembles 12 sub-assemblies from that kit, including a Rao bell nozzle, a pintle injector, the turbopump with its volutes, the gas generator, feed ducts, gimbal and actuators.
 
-* Rao-style bell contour (cylindrical chamber → eased convergent → 0.382·rt throat arc → parabolic bell, area ratio ≈ 16)
-* coaxial **pintle injector** (sleeve, pintle tip, 3-ring orifice field, LOX dome, fuel manifold)
-* regeneratively-cooled chamber/nozzle jacket with hoop stiffeners, fuel inlet manifold, flanges and bolt rings, and a
-  radiatively-cooled extension skirt
-* single-shaft **turbopump** — RP-1 pump, turbine with inlet scroll, LOX pump, with spiral volutes
-* gas generator, LOX and RP-1 inlet/high-pressure ducts (bellows sections, clamps), the long **turbine-exhaust duct**
-  that runs down the nozzle, TEA-TEB igniter, sensors, junction box and harness, gimbal bearing/thrust mount and two
-  hydraulic actuators
+The wireframe is drawn from CAD-style edges rather than a raw triangle dump. Each primitive emits its own iso-lines and hoop rings, and these are simplified with Douglas–Peucker, so the full engine is about 10.5k line segments over roughly 115k shaded triangles. `npm run model:stats` prints the breakdown.
 
-It is a faithful *layout and proportions* approximation of the public engine configuration, not a licensed CAD export;
-dimensions are in metres with the thrust axis along Y. 12 assemblies (each with its own exploded-view offset and label anchor).
-
-**Wireframe = CAD edges, not a triangle dump.** Each primitive emits iso-lines and hoop rings which are decimated
-(Douglas-Peucker) so straight runs cost one segment. Total ≈ **9,900 line segments** (shown in the HUD) over ≈ 100k
-shaded triangles. Wireframe lines are additive with a depth cue; solid + wire mode switches the lines to depth-tested
-overlay. `npm run model:stats` prints the breakdown. Density is tuned by the `lines` / `ringSpacing` / `tol` arguments in
-`merlin.js`.
-
-## How the hand control works
-
-```
-camera → MediaPipe HandLandmarker → handPipeline → gestures → rig → scene
-                (landmarks)        (One-Euro filter,   (state        (quaternion
-                                    openness, Schmitt   machine)       kinematics)
-                                    clutch)
-```
-
-* **`tracking/oneEuro.js`** — adaptive low-pass on every landmark (normalised image *and* metric world coordinates).
-* **`tracking/handPipeline.js`** — track association, palm centre / in-plane roll / palm normal, and **openness** from
-  finger-extension ratio `|tip−wrist| / |mcp−wrist|` on 3-D world landmarks (view-angle independent). Open/fist uses a
-  **Schmitt trigger + dwell time** (hysteresis), so the clutch never flickers. Thresholds were calibrated against real
-  MediaPipe output: fist ≈ 0.85, relaxed open palm ≈ 1.5, fully spread ≈ 1.9.
-* **`tracking/gestures.js`** — grab/release/catch/flick state machine. The clutch fades the applied rotation to zero as the
-  hand closes, so closing your fist never drags the model; the flick velocity is measured from *before* the closing motion.
-* **`kinematics/rig.js`** — all orientation is **quaternions**. Inputs push rotation deltas into a *pending* accumulator
-  consumed with critically-damped smoothing (weighted feel, zero drift). Release hands the measured angular velocity to a
-  free-spin integrator (τ ≈ 3 s damping); a catch decays it with τ ≈ 0.14 s. Zoom/pan are smoothed in log/screen space.
-  Supports **model rotation** (default) or **camera orbit**.
-
-Tuning knobs live in `GAINS` (`gestures.js`), `DEFAULTS` (`handPipeline.js`) and the tau constants at the top of `Rig`.
-The *Sensitivity* slider scales rotation and pan.
+The proportions follow the public engine layout. This is not a licensed CAD export. Units are metres, with +Y along the thrust axis.
 
 ## Rendering
 
-Dark space background with faint stars; bright cyan additive wire with optional **bloom**, **vignette** and dither;
-MSAA half-float pipeline. Solid mode uses PBR metals (steel, chrome, bronze, copper, Inconel, titanium) under key/fill/rim
-lights plus an image-based environment and shadow-mapped key light. Optional **holographic glass** shader, **anaglyph**
-stereo, and **WebXR** (`V` / VR button: controllers or hand-tracking pinch to grab; both hands scale/move). Quality is
-*Auto* by default: a governor drops resolution / MSAA / shadows when the frame time exceeds ~21 ms.
+- **Wireframe:** cyan lines with max blending and a depth cue.
+- **Solid mode:** PBR metals under key, fill and rim lights, with image-based lighting and shadows.
+- **Optional modes:** bloom, vignette, a holographic-glass shader, anaglyph stereo, and WebXR, where you grab with controllers or pinch with your hands.
+- **Auto quality:** when frames take longer than about 21 ms, the renderer lowers resolution, MSAA and shadow quality.
 
-## Sound
+Sound effects are synthesised with WebAudio, so the project has no audio files.
 
-Synthesised with WebAudio (no files): soft ticks on grab/release, a thump on catch, and a noise whoosh that follows spin
-speed. `M` mutes; the *Sound* switch in Settings does the same.
-
-## Layout
+## Project layout
 
 ```
 src/
-  main.js              wiring + frame loop
-  state.js             settings store (persisted subset)
-  model/               geom.js (primitives) · merlin.js (the engine)
-  scene/               stage.js (renderer, post, lights) · engineView.js (modes, explode, isolate)
-  tracking/            handTracker.js · handPipeline.js · gestures.js · oneEuro.js
-  kinematics/rig.js    quaternion view rig
-  ui/                  hud.js · labels.js     audio/sfx.js     xr/xr.js     perf.js
-scripts/fetch-assets.mjs   copies MediaPipe WASM, downloads hand_landmarker.task
-tests/                     node:test unit tests with synthetic hands
+  main.ts          app wiring and frame loop
+  state.ts         typed settings store (persisted to localStorage)
+  model/           geom.ts (primitive kit) · merlin.ts (the engine)
+  scene/           stage.ts (renderer, lights, post) · engineView.ts (modes, explode, isolate)
+  tracking/        handTracker.ts · handPipeline.ts · gestures.ts · oneEuro.ts
+  kinematics/      rig.ts
+  ui/              hud.ts · labels.ts
+  audio/ xr/       sfx.ts · xr.ts
+  perf.ts          adaptive quality governor
+scripts/           fetch-assets.ts · model-stats.ts
+tests/             node:test suites using synthetic hands
 ```
+
+## Scripts
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Dev server with hot reload |
+| `npm run build` | Type-check and build a self-contained bundle (model and WASM included) into `dist/` |
+| `npm run preview` | Serve `dist/` |
+| `npm test` | Unit tests for filtering, gestures and kinematics (no browser needed) |
+| `npm run typecheck` | `tsc` in strict mode |
+| `npm run model:stats` | Per-assembly edge and triangle counts |
+| `npm run lan` | Build and serve over self-signed HTTPS, to test from a phone or headset on your network |
+
+Tests and scripts run as TypeScript directly through Node's built-in type stripping. There is no compile step.
 
 ## Notes
 
-* First load of hand tracking fetches nothing from the network when `public/wasm` and `public/models` are present
-  (done by `npm install`); otherwise it falls back to jsDelivr / Google's model CDN.
-* Hand tracking runs on the main thread (GPU delegate, CPU fallback). For best results light your hand evenly and keep it
-  roughly 40–80 cm from the camera, palm facing it.
-* Browsers only expose the camera on `https://` or `http://localhost`.
+- Browsers only allow camera access on `https://` or `localhost`. Use `npm run lan` for other devices.
+- After `npm install`, hand tracking works offline. If `public/wasm` or `public/models` is missing, the app falls back to jsDelivr and Google's model CDN.

@@ -4,25 +4,50 @@
  * connects each text back to its anchor dot.
  */
 import * as THREE from 'three';
+import type { AssemblyId } from '../model/merlin.ts';
+import type { EngineView } from '../scene/engineView.ts';
+
+type Side = -1 | 1;
+interface Callout {
+  id: AssemblyId;
+  text: HTMLDivElement;
+  line: SVGPolylineElement;
+  dot: SVGCircleElement;
+  side: Side;
+  /** projected anchor (px) */
+  x: number;
+  y: number;
+  /** de-collided text row (px) */
+  ty: number;
+  show: boolean;
+  alpha: number;
+  pts: string;
+}
 
 const _v = new THREE.Vector3();
 const _p = new THREE.Vector3();
 const NS = 'http://www.w3.org/2000/svg';
 const GAP = 19; // minimum vertical spacing between callouts (px)
-const SIDES = [-1, 1];
-const byTy = (a, b) => a.ty - b.ty;
+const SIDES: readonly Side[] = [-1, 1];
+const byTy = (a: Callout, b: Callout) => a.ty - b.ty;
 
 export class Labels {
-  constructor(container, view) {
+  visible = false;
+  private readonly el: HTMLElement;
+  private readonly view: EngineView;
+  private readonly svg: SVGSVGElement;
+  private readonly items: Callout[];
+  /** per-side scratch columns, reused every frame */
+  private readonly cols: Record<Side, Callout[]> = { [-1]: [], 1: [] };
+
+  constructor(container: HTMLElement, view: EngineView) {
     this.el = container;
     this.view = view;
-    this.visible = false;
-    this.cols = { [-1]: [], 1: [] }; // reused per frame
     this.svg = document.createElementNS(NS, 'svg');
     this.svg.setAttribute('class', 'label-lines');
     container.appendChild(this.svg);
 
-    this.items = view.parts.map((p) => {
+    this.items = view.parts.map((p): Callout => {
       const text = document.createElement('div');
       text.className = 'label';
       text.textContent = p.def.name;
@@ -36,13 +61,16 @@ export class Labels {
     this.setVisible(false);
   }
 
-  setVisible(v) {
+  setVisible(v: boolean): void {
     this.visible = v;
     this.el.style.display = v ? 'block' : 'none';
   }
 
-  update(camera, width, height) {
+  update(camera: THREE.Camera, width: number, height: number): void {
     if (!this.visible) return;
+    // the root and camera were moved this frame; render() hasn't refreshed their matrices yet
+    camera.updateMatrixWorld();
+    this.view.root.updateMatrixWorld();
     const iso = this.view.isolated;
 
     for (const it of this.items) {
@@ -72,13 +100,14 @@ export class Labels {
 
     // write to the DOM only when something actually changed (a still engine costs nothing)
     for (const it of this.items) {
-      const p = this.view.byId.get(it.id);
+      const p = this.view.byId.get(it.id)!;
       const alpha = it.show ? Math.round(Math.max(0.2, p.vis) * 100) / 100 : 0;
       if (alpha !== it.alpha) {
         it.alpha = alpha;
-        it.text.style.opacity = alpha;
-        it.line.style.opacity = alpha;
-        it.dot.style.opacity = alpha;
+        const o = String(alpha);
+        it.text.style.opacity = o;
+        it.line.style.opacity = o;
+        it.dot.style.opacity = o;
       }
       if (!it.show) continue;
       const elbow = it.x + it.side * 26;

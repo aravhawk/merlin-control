@@ -4,6 +4,53 @@
  * hover-highlight and isolate.
  */
 import * as THREE from 'three';
+import type { MaterialKey } from '../model/geom.ts';
+import type { Assembly, AssemblyId, MerlinModel } from '../model/merlin.ts';
+import type { ViewMode } from '../state.ts';
+import type { Look } from './stage.ts';
+
+type Uniform<T> = { value: T };
+interface WireUniforms {
+  [name: string]: Uniform<unknown>;
+  uColor: Uniform<THREE.Color>;
+  uHot: Uniform<THREE.Color>;
+  uOpacity: Uniform<number>;
+  uMix: Uniform<number>;
+  uNear: Uniform<number>;
+  uFar: Uniform<number>;
+  uFade: Uniform<number>;
+}
+interface GlassUniforms {
+  [name: string]: Uniform<unknown>;
+  uColor: Uniform<THREE.Color>;
+  uHot: Uniform<THREE.Color>;
+  uOpacity: Uniform<number>;
+  uMix: Uniform<number>;
+  uTime: Uniform<number>;
+}
+type WireMaterial = THREE.ShaderMaterial & { uniforms: WireUniforms };
+type GlassMaterial = THREE.ShaderMaterial & { uniforms: GlassUniforms };
+
+interface SolidMesh {
+  mesh: THREE.Mesh;
+  pbr: THREE.MeshStandardMaterial;
+  glass: GlassMaterial;
+}
+
+/** Scene objects + animated view state for one assembly. */
+export interface PartView {
+  def: Assembly;
+  group: THREE.Group;
+  wire: THREE.LineSegments;
+  wireMat: WireMaterial;
+  solids: SolidMesh[];
+  offset: THREE.Vector3;
+  anchor: THREE.Vector3;
+  /** current visibility 0..1 (ghosting) */
+  vis: number;
+  /** current highlight 0..1 */
+  hl: number;
+}
 
 // ───────────────────────────────────────────── materials ──
 
@@ -34,7 +81,7 @@ const WIRE_FRAG = /* glsl */ `
     #include <colorspace_fragment>
   }`;
 
-function makeWireMaterial() {
+function makeWireMaterial(): WireMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: new THREE.Color(0x86deff) },
@@ -54,7 +101,7 @@ function makeWireMaterial() {
     blendEquation: THREE.MaxEquation,
     blendSrc: THREE.OneFactor,
     blendDst: THREE.OneFactor,
-  });
+  }) as WireMaterial;
 }
 
 const GLASS_VERT = /* glsl */ `
@@ -89,7 +136,7 @@ const GLASS_FRAG = /* glsl */ `
     #include <colorspace_fragment>
   }`;
 
-function makeGlassMaterial() {
+function makeGlassMaterial(): GlassMaterial {
   return new THREE.ShaderMaterial({
     uniforms: {
       uColor: { value: new THREE.Color(0x3fb6ff) },
@@ -104,11 +151,11 @@ function makeGlassMaterial() {
     depthWrite: false,
     side: THREE.DoubleSide,
     blending: THREE.AdditiveBlending,
-  });
+  }) as GlassMaterial;
 }
 
 /** PBR presets for the CAD-style solid mode. */
-const PBR = {
+const PBR: Record<MaterialKey, { color: number; metalness: number; roughness: number }> = {
   steel: { color: 0xc3c8d0, metalness: 0.92, roughness: 0.36 },
   chrome: { color: 0xd9dfe7, metalness: 1.0, roughness: 0.18 },
   bronze: { color: 0xb88a52, metalness: 0.9, roughness: 0.34 },
@@ -121,33 +168,35 @@ const PBR = {
 const _tmp = new THREE.Vector3();
 
 export class EngineView {
-  /**
-   * @param {ReturnType<import('../model/merlin.js').buildMerlin>} model
-   */
-  constructor(model) {
-    this.root = new THREE.Group(); // oriented by the rig
-    this.content = new THREE.Group(); // recentred model
+  /** oriented by the rig */
+  readonly root = new THREE.Group();
+  /** recentred model */
+  readonly content = new THREE.Group();
+  readonly radius: number;
+  readonly parts: PartView[];
+  readonly byId: Map<AssemblyId, PartView>;
+  mode: ViewMode = 'wire';
+  glass = false;
+  explodeTarget = 0;
+  explode = 0;
+  private explodeVel = 0;
+  hover: AssemblyId | null = null;
+  isolated: AssemblyId | null = null;
+  private time = 0;
+
+  constructor(model: MerlinModel) {
     this.root.add(this.content);
 
     const center = model.bounds.getCenter(new THREE.Vector3());
     this.content.position.copy(center).multiplyScalar(-1);
     this.radius = model.bounds.getBoundingSphere(new THREE.Sphere()).radius;
 
-    this.mode = 'wire'; // wire | solid | both
-    this.glass = false;
-    this.explodeTarget = 0;
-    this.explode = 0;
-    this.explodeVel = 0;
-    this.hover = null;
-    this.isolated = null;
-    this.time = 0;
-
     this.parts = model.assemblies.map((def) => this._buildAssembly(def));
     this.byId = new Map(this.parts.map((p) => [p.def.id, p]));
     this.applyMode();
   }
 
-  _buildAssembly(def) {
+  private _buildAssembly(def: Assembly): PartView {
     const group = new THREE.Group();
     group.name = def.id;
 
@@ -159,7 +208,7 @@ export class EngineView {
     wire.renderOrder = 5;
     group.add(wire);
 
-    const solids = def.solids.map(({ material, geometry }) => {
+    const solids = def.solids.map(({ material, geometry }): SolidMesh => {
       const pbr = new THREE.MeshStandardMaterial({
         ...PBR[material],
         side: THREE.DoubleSide,
@@ -172,10 +221,8 @@ export class EngineView {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.frustumCulled = false;
-      mesh.userData.pbr = pbr;
-      mesh.userData.glass = makeGlassMaterial();
       group.add(mesh);
-      return mesh;
+      return { mesh, pbr, glass: makeGlassMaterial() };
     });
 
     this.content.add(group);
@@ -193,26 +240,26 @@ export class EngineView {
   }
 
   // ── state setters ──────────────────────────────────────────────────
-  setMode(mode) {
+  setMode(mode: ViewMode): void {
     this.mode = mode;
     this.applyMode();
   }
-  setGlass(on) {
+  setGlass(on: boolean): void {
     this.glass = on;
     this.applyMode();
   }
-  setExplode(amount) {
+  setExplode(amount: number): void {
     this.explodeTarget = amount;
   }
-  setHover(id) {
+  setHover(id: AssemblyId | null): void {
     this.hover = id;
   }
-  setIsolated(id) {
+  setIsolated(id: AssemblyId | null): void {
     this.isolated = id;
   }
 
   /** How much bigger the model's framing is right now (the exploded view spreads parts out ~30%). */
-  get frameScale() {
+  get frameScale(): number {
     return 1 + 0.3 * THREE.MathUtils.clamp(this.explode, 0, 1.2);
   }
 
@@ -221,7 +268,7 @@ export class EngineView {
    * threshold and a little less exposure; glowing wire and glass want low-threshold bloom.
    * Shadows only matter when lit solids are visible.
    */
-  get look() {
+  get look(): Look {
     const lit = this.mode !== 'wire' && !this.glass;
     return {
       bloomThreshold: lit ? 1.05 : 0.22,
@@ -231,24 +278,23 @@ export class EngineView {
     };
   }
 
-  applyMode() {
+  applyMode(): void {
     const showWire = this.mode !== 'solid';
     const showSolid = this.mode !== 'wire';
     for (const p of this.parts) {
       p.wire.visible = showWire;
       p.wireMat.depthTest = this.mode === 'both' && !this.glass;
-      for (const m of p.solids) {
-        m.visible = showSolid;
-        m.material = this.glass ? m.userData.glass : m.userData.pbr;
-        m.castShadow = !this.glass;
-        m.receiveShadow = !this.glass;
+      for (const { mesh, pbr, glass } of p.solids) {
+        mesh.visible = showSolid;
+        mesh.material = this.glass ? glass : pbr;
+        mesh.castShadow = !this.glass;
+        mesh.receiveShadow = !this.glass;
       }
     }
   }
 
   // ── per-frame ──────────────────────────────────────────────────────
-  /** @param {number} dt @param {THREE.Camera} camera */
-  update(dt, camera) {
+  update(dt: number, camera: THREE.Camera): void {
     this.time += dt;
 
     // exploded view: lightly under-damped spring → smooth separation with a hint of settle
@@ -290,15 +336,14 @@ export class EngineView {
       u.uFar.value = far;
       u.uFade.value = this.mode === 'wire' ? 1 : 0.5;
 
-      for (const m of p.solids) {
-        if (!m.visible) continue;
+      for (const { mesh, pbr: mat, glass } of p.solids) {
+        if (!mesh.visible) continue;
         if (this.glass) {
-          const g = m.userData.glass.uniforms;
+          const g = glass.uniforms;
           g.uOpacity.value = p.vis;
           g.uMix.value = p.hl;
           g.uTime.value = this.time;
         } else {
-          const mat = m.userData.pbr;
           const ghost = p.vis < 0.995;
           if (mat.transparent !== ghost) {
             mat.transparent = ghost;
@@ -307,15 +352,15 @@ export class EngineView {
           }
           mat.opacity = p.vis;
           mat.emissive.setRGB(0.1 * p.hl, 0.55 * p.hl, 0.75 * p.hl);
-          m.castShadow = p.vis > 0.5;
+          mesh.castShadow = p.vis > 0.5;
         }
       }
     }
   }
 
   /** World position of an assembly's label anchor (follows explode offset + rotation). */
-  anchorWorld(id, out = new THREE.Vector3()) {
-    const p = this.byId.get(id);
+  anchorWorld(id: AssemblyId, out = new THREE.Vector3()): THREE.Vector3 {
+    const p = this.byId.get(id)!;
     out.copy(p.anchor).add(_tmp.copy(p.offset).multiplyScalar(this.explode));
     return this.content.localToWorld(out);
   }
