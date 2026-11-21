@@ -95,7 +95,7 @@ src/
   ui/              hud.ts · labels.ts
   audio/ xr/       sfx.ts · xr.ts
   perf.ts          adaptive quality governor
-scripts/           fetch-assets.ts · model-stats.ts
+scripts/           fetch-assets.ts · model-stats.ts · og-image.ts
 tests/             node:test suites using synthetic hands
 ```
 
@@ -112,6 +112,18 @@ tests/             node:test suites using synthetic hands
 | `npm run lan` | Build and serve over self-signed HTTPS, to test from a phone or headset on your network |
 
 Tests and scripts run as TypeScript directly through Node's built-in type stripping. There is no compile step.
+
+## Social preview
+
+`index.html` carries the canonical link, Open Graph and Twitter card tags for `https://merlin.aravhawk.com`. All of the URLs in them are absolute, because link scrapers do not resolve relative paths. The card image is `public/og-image.png` (1200 × 630). `tests/share-meta.test.ts` checks the tags and the image size.
+
+The image is drawn from the real engine model, so it can be regenerated whenever the geometry changes:
+
+```bash
+node scripts/og-image.ts og-card.html
+```
+
+Open `og-card.html` in a browser at exactly 1200 × 630 with a device pixel ratio of 1, wait for the web font to load, and save a screenshot over `public/og-image.png`. The page loads JetBrains Mono from Google Fonts, so it needs a network connection.
 
 ## Notes
 
