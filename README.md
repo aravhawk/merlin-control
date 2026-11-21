@@ -95,7 +95,7 @@ src/
   ui/              hud.ts · labels.ts
   audio/ xr/       sfx.ts · xr.ts
   perf.ts          adaptive quality governor
-scripts/           fetch-assets.ts · model-stats.ts · og-image.ts
+scripts/           fetch-assets.ts · model-stats.ts · og-image.ts · icons.ts
 tests/             node:test suites using synthetic hands
 ```
 
@@ -113,7 +113,7 @@ tests/             node:test suites using synthetic hands
 
 Tests and scripts run as TypeScript directly through Node's built-in type stripping. There is no compile step.
 
-## Social preview
+## Social preview and SEO
 
 `index.html` carries the canonical link, Open Graph and Twitter card tags for `https://merlin.aravhawk.com`. All of the URLs in them are absolute, because link scrapers do not resolve relative paths. The card image is `public/og-image.png` (1200 × 630). `tests/share-meta.test.ts` checks the tags and the image size.
 
@@ -124,6 +124,26 @@ node scripts/og-image.ts og-card.html
 ```
 
 Open `og-card.html` in a browser at exactly 1200 × 630 with a device pixel ratio of 1, wait for the web font to load, and save a screenshot over `public/og-image.png`. The page loads JetBrains Mono from Google Fonts, so it needs a network connection.
+
+Search and install metadata lives in the same two places:
+
+| File | Purpose |
+| --- | --- |
+| `index.html` | `robots` meta (`index, follow`), icon and manifest links, and JSON-LD for the `WebSite`, the `WebApplication` and its author |
+| `public/robots.txt` | Allows crawling and points at the sitemap |
+| `public/sitemap.xml` | The one page. Add a `<url>` here for any page you add, and give that page its own canonical, title and description |
+| `public/manifest.webmanifest` | Name, colors and the 192 and 512 px icons |
+| `public/favicon.*`, `apple-touch-icon.png`, `icon-*.png` | Tab, iOS and install icons |
+
+There is no `Organization`, `Article` or `hreflang` markup because the site has no organization, no articles and only one language. Production is indexable. Vercel adds its own `noindex` header to preview deployments, so the head does not change between environments.
+
+The icons are drawn from the engine's real thrust chamber contour:
+
+```bash
+node scripts/icons.ts icons-out
+```
+
+Copy `icons-out/favicon.svg` to `public/favicon.svg`. Screenshot `icons-out/icon-bleed.svg` at 512 × 512 (device pixel ratio 1) for `public/icon-512.png`, then scale that down to `icon-192.png` (192 px) and `apple-touch-icon.png` (180 px). `favicon.ico` holds the same artwork at 16, 32 and 48 px on a rounded tile. `tests/seo.test.ts` checks every size.
 
 ## Notes
 

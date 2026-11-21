@@ -5,8 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Merlin 1D: Rotate a 3D Rocket Engine With Your Hands</title>
   <meta name="description" content="Rotate, zoom and spin a 3D SpaceX Merlin 1D engine with your bare hands. Webcam hand tracking in your browser, inspired by the 2013 Future of Design demo." />
+  <!-- Production is indexable. Vercel adds its own noindex header to preview deployments, so nothing here needs to change per environment. -->
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
   <meta name="theme-color" content="#02040a" />
+  <meta name="application-name" content="Merlin 1D" />
+  <meta name="apple-mobile-web-app-title" content="Merlin 1D" />
   <link rel="canonical" href="https://merlin.aravhawk.com/" />
+
+  <!-- Icons and web app manifest. Exported from scripts/icons.ts (see the README). -->
+  <link rel="icon" href="/favicon.ico" sizes="32x32" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.webmanifest" />
 
   <!-- Open Graph. Every URL is absolute on the production domain (scrapers do not resolve relative paths). -->
   <meta property="og:type" content="website" />
@@ -28,6 +39,52 @@
   <meta name="twitter:description" content="Rotate, zoom and spin a 3D SpaceX Merlin 1D engine with your bare hands. Webcam hand tracking in your browser, inspired by the 2013 Future of Design demo." />
   <meta name="twitter:image" content="https://merlin.aravhawk.com/og-image.png" />
   <meta name="twitter:image:alt" content="Glowing cyan wireframe of the SpaceX Merlin 1D rocket engine floating in space, beside the headline: Rotate a rocket engine with your bare hands." />
+
+  <!-- Structured data: the site, the web app it hosts, and who makes it. No Organization or Article: neither exists here. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://merlin.aravhawk.com/#website",
+        "url": "https://merlin.aravhawk.com/",
+        "name": "Merlin 1D",
+        "description": "Rotate, zoom and spin a 3D SpaceX Merlin 1D engine with your bare hands. Webcam hand tracking in your browser, inspired by the 2013 Future of Design demo.",
+        "inLanguage": "en",
+        "publisher": { "@id": "https://merlin.aravhawk.com/#author" }
+      },
+      {
+        "@type": "WebApplication",
+        "@id": "https://merlin.aravhawk.com/#app",
+        "url": "https://merlin.aravhawk.com/",
+        "name": "Merlin 1D",
+        "description": "Rotate, zoom and spin a 3D SpaceX Merlin 1D engine with your bare hands. Webcam hand tracking in your browser, inspired by the 2013 Future of Design demo.",
+        "image": "https://merlin.aravhawk.com/og-image.png",
+        "applicationCategory": "MultimediaApplication",
+        "operatingSystem": "Any",
+        "browserRequirements": "Requires JavaScript and WebGL. A webcam is needed for hand tracking.",
+        "featureList": [
+          "Hand tracking through a webcam: grab, rotate, zoom and pan",
+          "Exploded view and part isolation",
+          "Wireframe, solid and holographic glass display modes",
+          "Anaglyph 3D and WebXR where available"
+        ],
+        "isAccessibleForFree": true,
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "inLanguage": "en",
+        "isPartOf": { "@id": "https://merlin.aravhawk.com/#website" },
+        "author": { "@id": "https://merlin.aravhawk.com/#author" }
+      },
+      {
+        "@type": "Person",
+        "@id": "https://merlin.aravhawk.com/#author",
+        "name": "aravhawk",
+        "url": "https://github.com/aravhawk"
+      }
+    ]
+  }
+  </script>
 
   <link rel="stylesheet" href="/src/style.css" />
 </head>

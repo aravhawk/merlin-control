@@ -1,0 +1,17 @@
+{
+  "name": "Merlin 1D",
+  "short_name": "Merlin 1D",
+  "description": "Rotate, zoom and spin a 3D SpaceX Merlin 1D engine with your bare hands. Webcam hand tracking in your browser, inspired by the 2013 Future of Design demo.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#02040a",
+  "theme_color": "#02040a",
+  "lang": "en",
+  "dir": "ltr",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

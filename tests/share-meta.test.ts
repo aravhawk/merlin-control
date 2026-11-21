@@ -2,34 +2,7 @@
 // The app is a single page (no router), so one document head covers every URL.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, statSync } from 'node:fs';
-
-const ORIGIN = 'https://merlin.aravhawk.com';
-const root = new URL('../', import.meta.url);
-const html = readFileSync(new URL('index.html', root), 'utf8');
-const head = html.slice(html.indexOf('<head>'), html.indexOf('</head>'));
-
-type Attrs = Record<string, string>;
-
-function tags(name: 'meta' | 'link'): Attrs[] {
-  return [...head.matchAll(new RegExp(`<${name}\\s([^>]*?)/?>`, 'g'))].map((m) => {
-    const attrs: Attrs = {};
-    for (const a of m[1].matchAll(/([\w:-]+)="([^"]*)"/g)) attrs[a[1]] = a[2];
-    return attrs;
-  });
-}
-
-const metas = tags('meta');
-const links = tags('link');
-
-/** Content of the one meta tag whose `key` attribute (property or name) equals `value`. */
-function meta(key: 'property' | 'name', value: string): string {
-  const found = metas.filter((m) => m[key] === value);
-  assert.equal(found.length, 1, `expected exactly one <meta ${key}="${value}">, found ${found.length}`);
-  return found[0].content;
-}
-
-const title = /<title>([^<]*)<\/title>/.exec(head)?.[1] ?? '';
+import { ORIGIN, head, links, meta, metas, pngSize, publicSize, readPublic, title } from './head.ts';
 
 test('canonical link points at the production domain', () => {
   const canonical = links.filter((l) => l.rel === 'canonical');
@@ -75,18 +48,13 @@ test('head copy has no em dashes', () => {
   assert.ok(!head.includes(emDash), 'found an em dash in <head>');
 });
 
-test('every absolute URL in the head uses the production domain', () => {
-  const urls = [...head.matchAll(/https?:\/\/[^\s"<]+/g)].map((m) => m[0]);
+test('every absolute URL in a meta or link tag uses the production domain', () => {
+  const urls = [...metas, ...links].flatMap((a) => Object.values(a)).filter((v) => /^https?:\/\//.test(v));
   assert.ok(urls.length > 0);
-  for (const url of urls) assert.ok(url.startsWith(`${ORIGIN}/`), `unexpected origin in ${url}`);
+  for (const url of urls) assert.ok(url === ORIGIN || url.startsWith(`${ORIGIN}/`), `unexpected origin in ${url}`);
 });
 
 test('the share image ships in public/ as a 1200x630 PNG', () => {
-  const file = new URL('public/og-image.png', root);
-  const png = readFileSync(file);
-  assert.equal(png.subarray(1, 4).toString('latin1'), 'PNG');
-  assert.equal(png.subarray(12, 16).toString('latin1'), 'IHDR');
-  assert.equal(png.readUInt32BE(16), 1200, 'width');
-  assert.equal(png.readUInt32BE(20), 630, 'height');
-  assert.ok(statSync(file).size < 600 * 1024, 'keep the share image under 600 kB so scrapers do not drop it');
+  assert.deepEqual(pngSize(readPublic('og-image.png')), { width: 1200, height: 630 });
+  assert.ok(publicSize('og-image.png') < 600 * 1024, 'keep the share image under 600 kB so scrapers do not drop it');
 });
